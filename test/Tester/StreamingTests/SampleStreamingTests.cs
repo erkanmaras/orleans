@@ -1,13 +1,15 @@
 using System;
+using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Orleans;
-using Orleans.Providers.Streams.AzureQueue;
+using Orleans.Hosting;
 using Orleans.Runtime;
 using Orleans.Runtime.Configuration;
 using Orleans.Streams;
 using Orleans.TestingHost;
 using Orleans.TestingHost.Utils;
-using Tester;
 using TestExtensions;
 using UnitTests.GrainInterfaces;
 using Xunit;
@@ -19,19 +21,30 @@ namespace UnitTests.StreamingTests
     {
         private readonly Fixture fixture;
 
-        private Logger logger;
+        private readonly ILogger logger;
 
         public class Fixture : BaseTestClusterFixture
         {
-            protected override TestCluster CreateTestCluster()
+            protected override void ConfigureTestCluster(TestClusterBuilder builder)
             {
-                var options = new TestClusterOptions(2);
+                builder.AddSiloBuilderConfigurator<SiloConfigurator>();
+                builder.AddClientBuilderConfigurator<ClientConfiguretor>();
+            }
 
-                options.ClusterConfiguration.AddMemoryStorageProvider("PubSubStore");
-
-                options.ClusterConfiguration.AddSimpleMessageStreamProvider(StreamProvider, false);
-                options.ClientConfiguration.AddSimpleMessageStreamProvider(StreamProvider, false);
-                return new TestCluster(options);
+            public class SiloConfigurator : ISiloBuilderConfigurator
+            {
+                public void Configure(ISiloHostBuilder hostBuilder)
+                {
+                    hostBuilder.AddSimpleMessageStreamProvider(StreamProvider)
+                         .AddMemoryGrainStorage("PubSubStore");
+                }
+            }
+            public class ClientConfiguretor : IClientBuilderConfigurator
+            {
+                public void Configure(IConfiguration configuration, IClientBuilder clientBuilder)
+                {
+                    clientBuilder.AddSimpleMessageStreamProvider(StreamProvider);
+                }
             }
         }
 
@@ -41,6 +54,17 @@ namespace UnitTests.StreamingTests
         {
             this.fixture = fixture;
             logger = this.fixture.Logger;
+        }
+
+        [Fact, TestCategory("BVT"), TestCategory("Functional")]
+        public void SampleStreamingTests_StreamTypeMismatch_ShouldThrowOrleansException()
+        {
+            var streamId = Guid.NewGuid();
+            var streamNameSpace = "SmsStream";
+            var stream = this.fixture.Client.GetStreamProvider(StreamProvider).GetStream<int>(streamId, streamNameSpace);
+            Assert.Throws<Orleans.Runtime.OrleansException>(() => {
+                this.fixture.Client.GetStreamProvider(StreamProvider).GetStream<string>(streamId, streamNameSpace);
+                });
         }
 
         [Fact, TestCategory("BVT"), TestCategory("Functional")]
@@ -74,7 +98,7 @@ namespace UnitTests.StreamingTests
             var streamId = Guid.NewGuid();
             const int nRedEvents = 5, nBlueEvents = 3;
 
-            var provider = this.fixture.HostedCluster.StreamProviderManager.GetStreamProvider(StreamTestsConstants.SMS_STREAM_PROVIDER_NAME);
+            var provider = this.fixture.HostedCluster.ServiceProvider.GetServiceByName<IStreamProvider>(StreamTestsConstants.SMS_STREAM_PROVIDER_NAME);
             var redStream = provider.GetStream<int>(streamId, "red");
             var blueStream = provider.GetStream<int>(streamId, "blue");
 
@@ -89,6 +113,77 @@ namespace UnitTests.StreamingTests
             Assert.Equal(nRedEvents, counters.Item1);
             Assert.Equal(nBlueEvents, counters.Item2);
         }
+
+        [Fact, TestCategory("Functional")]
+        public async Task FilteredImplicitSubscriptionGrainTest()
+        {
+            this.logger.Info($"************************ {nameof(FilteredImplicitSubscriptionGrainTest)} *********************************");
+
+            var streamNamespaces = new[] { "red1", "red2", "blue3", "blue4" };
+            var events = new[] { 3, 5, 2, 4 };
+            var testData = streamNamespaces.Zip(events, (s, e) => new
+            {
+                Namespace = s,
+                Events = e,
+                StreamId = Guid.NewGuid()
+            }).ToList();
+
+            var provider = this.fixture.HostedCluster.ServiceProvider.GetServiceByName<IStreamProvider>(StreamTestsConstants.SMS_STREAM_PROVIDER_NAME);
+            foreach (var item in testData)
+            {
+                var stream = provider.GetStream<int>(item.StreamId, item.Namespace);
+                for (int i = 0; i < item.Events; i++)
+                    await stream.OnNextAsync(i);
+            }
+
+            foreach (var item in testData)
+            {
+                var grain = this.fixture.GrainFactory.GetGrain<IFilteredImplicitSubscriptionGrain>(item.StreamId);
+                var actual = await grain.GetCounter(item.Namespace);
+                var expected = item.Namespace.StartsWith("red") ? item.Events : 0;
+                Assert.Equal(expected, actual);
+            }
+        }
+
+        [Fact, TestCategory("Functional")]
+        public async Task FilteredImplicitSubscriptionWithExtensionGrainTest()
+        {
+            logger.Info($"************************ {nameof(FilteredImplicitSubscriptionWithExtensionGrainTest)} *********************************");
+
+            var redEvents = new[] { 3, 5, 2, 4 };
+            var blueEvents = new[] { 7, 3, 6 };
+
+            var streamId = Guid.NewGuid();
+
+            var provider = this.fixture.HostedCluster.ServiceProvider.GetServiceByName<IStreamProvider>(StreamTestsConstants.SMS_STREAM_PROVIDER_NAME);
+            for (int i = 0; i < redEvents.Length; i++)
+            {
+                var stream = provider.GetStream<int>(streamId, "red" + i);
+                for (int j = 0; j < redEvents[i]; j++)
+                    await stream.OnNextAsync(j);
+            }
+            for (int i = 0; i < blueEvents.Length; i++)
+            {
+                var stream = provider.GetStream<int>(streamId, "blue" + i);
+                for (int j = 0; j < blueEvents[i]; j++)
+                    await stream.OnNextAsync(j);
+            }
+
+            for (int i = 0; i < redEvents.Length; i++)
+            {
+                var grain = this.fixture.GrainFactory.GetGrain<IFilteredImplicitSubscriptionWithExtensionGrain>(
+                    streamId, "red" + i, null);
+                var actual = await grain.GetCounter();
+                Assert.Equal(redEvents[i], actual);
+            }
+            for (int i = 0; i < blueEvents.Length; i++)
+            {
+                var grain = this.fixture.GrainFactory.GetGrain<IFilteredImplicitSubscriptionWithExtensionGrain>(
+                    streamId, "blue" + i, null);
+                var actual = await grain.GetCounter();
+                Assert.Equal(0, actual);
+            }
+        }
     }
 
     public class SampleStreamingTests
@@ -97,10 +192,10 @@ namespace UnitTests.StreamingTests
         private static readonly TimeSpan _timeout = TimeSpan.FromSeconds(30);
 
         private readonly string streamProvider;
-        private readonly Logger logger;
+        private readonly ILogger logger;
         private readonly TestCluster cluster;
 
-        public SampleStreamingTests(string streamProvider, Logger logger, TestCluster cluster)
+        public SampleStreamingTests(string streamProvider, ILogger logger, TestCluster cluster)
         {
             this.streamProvider = streamProvider;
             this.logger = logger;

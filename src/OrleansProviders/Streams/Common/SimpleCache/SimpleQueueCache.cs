@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Microsoft.Extensions.Logging;
 using Orleans.Runtime;
 using Orleans.Streams;
 
@@ -41,7 +42,7 @@ namespace Orleans.Providers.Streams.Common
     {
         private readonly LinkedList<SimpleQueueCacheItem> cachedMessages;
         private readonly int maxCacheSize;
-        private readonly Logger logger;
+        private readonly ILogger logger;
         private readonly List<CacheBucket> cacheCursorHistogram; // for backpressure detection
         private const int NUM_CACHE_HISTOGRAM_BUCKETS = 10;
         private readonly int CACHE_HISTOGRAM_MAX_BUCKET_SIZE;
@@ -64,7 +65,7 @@ namespace Orleans.Providers.Streams.Common
         /// </summary>
         /// <param name="cacheSize"></param>
         /// <param name="logger"></param>
-        public SimpleQueueCache(int cacheSize, Logger logger)
+        public SimpleQueueCache(int cacheSize, ILogger logger)
         {
             cachedMessages = new LinkedList<SimpleQueueCacheItem>();
             maxCacheSize = cacheSize;
@@ -149,7 +150,7 @@ namespace Orleans.Providers.Streams.Common
         }
 
         /// <summary>
-        /// Acquire a stream message cursor.  This can be used to retreave messages from the
+        /// Acquire a stream message cursor.  This can be used to retrieve messages from the
         ///   cache starting at the location indicated by the provided token.
         /// </summary>
         /// <param name="streamIdentity"></param>
@@ -173,12 +174,8 @@ namespace Orleans.Providers.Streams.Common
                 return;
             }
 
-            // if no token is provided, set cursor to idle at end of cache
-            if (sequenceToken == null)
-            {
-                UnsetCursor(cursor, cachedMessages.First?.Value?.SequenceToken);
-                return;
-            }
+            // if no token is provided, set token to item at end of cache
+            sequenceToken = sequenceToken ?? cachedMessages.First?.Value?.SequenceToken;
 
             // If sequenceToken is too new to be in cache, unset token, and wait for more data.
             if (sequenceToken.Newer(cachedMessages.First.Value.SequenceToken))
@@ -228,7 +225,7 @@ namespace Orleans.Providers.Streams.Common
         }
 
         /// <summary>
-        /// Aquires the next message in the cache at the provided cursor
+        /// Acquires the next message in the cache at the provided cursor
         /// </summary>
         /// <param name="cursor"></param>
         /// <param name="batch"></param>
@@ -318,9 +315,9 @@ namespace Orleans.Providers.Streams.Common
             cacheBucket.UpdateNumItems(1);
         }
 
-        internal static void Log(Logger logger, string format, params object[] args)
+        internal static void Log(ILogger logger, string format, params object[] args)
         {
-            if (logger.IsVerbose) logger.Verbose(format, args);
+            if (logger.IsEnabled(LogLevel.Debug)) logger.Debug(format, args);
             //if(logger.IsInfo) logger.Info(format, args);
         }
     }

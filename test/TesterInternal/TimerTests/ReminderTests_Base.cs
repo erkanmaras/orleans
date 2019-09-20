@@ -1,4 +1,4 @@
-﻿//#define USE_SQL_SERVER
+//#define USE_SQL_SERVER
 
 using System;
 using System.Collections.Generic;
@@ -6,10 +6,12 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Orleans;
 using Orleans.Runtime;
 using Orleans.Runtime.Configuration;
 using Orleans.TestingHost;
+using Orleans.TestingHost.Utils;
 using TestExtensions;
 using UnitTests.GrainInterfaces;
 using Xunit;
@@ -35,20 +37,20 @@ namespace UnitTests.TimerTests
         protected const long failAfter = 2; // NOTE: match this sleep with 'failCheckAfter' used in PerGrainFailureTest() so you dont try to get counter immediately after failure as new activation may not have the reminder statistics
         protected const long failCheckAfter = 6; // safe value: 9
 
-        protected Logger log;
+        protected ILogger log;
 
         public ReminderTests_Base(BaseTestClusterFixture fixture)
         {
             HostedCluster = fixture.HostedCluster;
             GrainFactory = fixture.GrainFactory;
 
-            ClientConfiguration cfg = ClientConfiguration.LoadFromFile("ClientConfigurationForTesting.xml");
-            LogManager.Initialize(cfg);
+            var filters = new LoggerFilterOptions();
 #if DEBUG
-            LogManager.AddTraceLevelOverride("Storage", Severity.Verbose3);
-            LogManager.AddTraceLevelOverride("Reminder", Severity.Verbose3);
+            filters.AddFilter("Storage", LogLevel.Trace);
+            filters.AddFilter("Reminder", LogLevel.Trace);
 #endif
-            log = LogManager.GetLogger(this.GetType().Name, LoggerType.Application);
+
+            log = TestingUtils.CreateDefaultLoggerFactory(TestingUtils.CreateTraceFileName("client", DateTime.Now.ToString("yyyyMMdd_hhmmss")), filters).CreateLogger<ReminderTests_Base>();
         }
 
         public IGrainFactory GrainFactory { get; }
@@ -61,8 +63,6 @@ namespace UnitTests.TimerTests
             controlProxy.EraseReminderTable().WaitWithThrow(TestConstants.InitTimeout);
         }
 
-        #region Test methods
-        #region Basic test
         public async Task Test_Reminders_Basic_StopByRef()
         {
             IReminderTestGrain2 grain = this.GrainFactory.GetGrain<IReminderTestGrain2>(Guid.NewGuid());
@@ -134,9 +134,7 @@ namespace UnitTests.TimerTests
                 Assert.Equal(2,  curr); // string.Format("Incorrect ticks for {0}_{1}", DR, i));
             }
         }
-        #endregion
 
-        #region Single join ... multi grain, multi reminders
         public async Task Test_Reminders_1J_MultiGrainMultiReminders()
         {
             IReminderTestGrain2 g1 = this.GrainFactory.GetGrain<IReminderTestGrain2>(Guid.NewGuid());
@@ -159,12 +157,11 @@ namespace UnitTests.TimerTests
             Thread.Sleep(period.Multiply(5));
             // start another silo ... although it will take it a while before it stabilizes
             log.Info("Starting another silo");
-            this.HostedCluster.StartAdditionalSilos(1);
+            await this.HostedCluster.StartAdditionalSilosAsync(1, true);
 
             //Block until all tasks complete.
             await Task.WhenAll(tasks).WithTimeout(ENDWAIT);
         }
-        #endregion
 
         public async Task Test_Reminders_ReminderNotFound()
         {
@@ -175,9 +172,6 @@ namespace UnitTests.TimerTests
            Assert.Null(reminder);
         }
 
-        #endregion
-
-        #region Multiple joins ... multi grain, multi reminders
         internal async Task<bool> PerGrainMultiReminderTestChurn(IReminderTestGrain2 g)
         {
             // for churn cases, we do execute start and stop reminders with retries as we don't have the queue-ing 
@@ -254,9 +248,7 @@ namespace UnitTests.TimerTests
 
             return true;
         }
-        #endregion
 
-        #region Multi grains multi reminders/grain test
         protected async Task<bool> PerGrainMultiReminderTest(IReminderTestGrain2 g)
         {
             TimeSpan period = await g.GetReminderPeriod(DR);
@@ -325,9 +317,7 @@ namespace UnitTests.TimerTests
 
             return true;
         }
-        #endregion
 
-        #region Multiple grain types
         protected async Task<bool> PerCopyGrainFailureTest(IReminderTestCopyGrain grain)
         {
             TimeSpan period = await grain.GetReminderPeriod(DR);
@@ -346,10 +336,7 @@ namespace UnitTests.TimerTests
 
             return true;
         }
-        #endregion
 
-        #region Utility methods
-        
         protected static string Time()
         {
             return DateTime.UtcNow.ToString("hh:mm:ss.fff");
@@ -433,8 +420,6 @@ namespace UnitTests.TimerTests
 
             return false;
         }
-
-        #endregion
     }
 }
 // ReSharper restore InconsistentNaming

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading.Tasks;
 using System.Linq;
 using Orleans;
@@ -20,7 +20,7 @@ namespace Tester.EventSourcingTests
             this.fixture = fixture;
         }
 
-        public async Task TestSequence(IAccountGrain account, bool hasLogStored)
+        private async Task TestSequence(IAccountGrain account, bool hasLogStored)
         {
             Assert.Equal(0u, await account.Balance());
 
@@ -55,12 +55,11 @@ namespace Tester.EventSourcingTests
             }
             else
             {
-                await Assert.ThrowsAsync(typeof(NotSupportedException), 
-                    async () => await account.GetTransactionLog());
+                await Assert.ThrowsAsync<NotSupportedException>(async () => await account.GetTransactionLog());
             }
         }
 
-        [Fact, TestCategory("EventSourcing"), TestCategory("Functional")]
+        [Fact(Skip = "Flaky test. See https://github.com/dotnet/orleans/issues/5605"), TestCategory("EventSourcing"), TestCategory("Functional")]
         public async Task AccountWithLog()
         {
             var account = this.fixture.GrainFactory.GetGrain<IAccountGrain>($"Account-{Guid.NewGuid()}", "TestGrains.AccountGrain");

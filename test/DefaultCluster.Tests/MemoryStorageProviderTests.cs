@@ -3,39 +3,51 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Orleans;
 using Orleans.Storage;
+using Orleans.Storage.Internal;
 using TestExtensions;
 using UnitTests.GrainInterfaces;
 using Xunit;
 
 namespace DefaultCluster.Tests.StorageTests
 {
+    [TestCategory("Storage"), TestCategory("MemoryStore")]
     public class MemoryStorageProviderTests : HostedTestClusterEnsureDefaultStarted
     {
         public MemoryStorageProviderTests(DefaultClusterFixture fixture) : base(fixture)
         {
         }
 
-        [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Storage")]
+        [Fact, TestCategory("BVT"), TestCategory("Functional")]
         public async Task MemoryStorageProvider_RestoreStateTest()
         {
             var grainWithState = this.GrainFactory.GetGrain<IInitialStateGrain>(0);
             Assert.NotNull(await grainWithState.GetNames());
         }
 
-        [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Storage")]
+        [Fact, TestCategory("BVT"), TestCategory("Functional")]
+        public async Task MemoryStorageProvider_NullState()
+        {
+            var grainWithState = this.GrainFactory.GetGrain<INullStateGrain>(0);
+            Assert.NotNull(await grainWithState.GetState());
+
+            await grainWithState.SetStateAndDeactivate(null);
+            await grainWithState.SetStateAndDeactivate(new NullableState { Name = "Thrall" });
+        }
+
+        [Fact, TestCategory("BVT"), TestCategory("Functional")]
         public async Task MemoryStorageProvider_WriteReadStateTest()
         {
             var grainWithState = this.GrainFactory.GetGrain<IInitialStateGrain>(0);
 
             List<string> names = await grainWithState.GetNames();
             Assert.NotNull(names);
-            Assert.Equal(0, names.Count);
+            Assert.Empty(names);
 
             // first write
             await grainWithState.AddName("Bob");
             names = await grainWithState.GetNames();
             Assert.NotNull(names);
-            Assert.Equal(1, names.Count);
+            Assert.Single(names);
             Assert.Equal("Bob", names[0]);
 
             // secodn write
@@ -47,7 +59,7 @@ namespace DefaultCluster.Tests.StorageTests
             Assert.Equal("Alice", names[1]);
         }
 
-        [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Storage")]
+        [Fact, TestCategory("BVT"), TestCategory("Functional")]
         public async Task MemoryStorageGrainEnforcesEtagsTest()
         {
             var memoryStorageGrain = this.GrainFactory.GetGrain<IMemoryStorageGrain>(random.Next());
@@ -67,20 +79,20 @@ namespace DefaultCluster.Tests.StorageTests
             Assert.NotNull(newEtag);
 
             // try to write new state with null etag;
-            await Assert.ThrowsAsync<InconsistentStateException>(() => memoryStorageGrain.WriteStateAsync("grain", "id", TestGrainState.CreateWithEtag(null)));
+            var ex = await Assert.ThrowsAsync<MemoryStorageEtagMismatchException>(() => memoryStorageGrain.WriteStateAsync("grain", "id", TestGrainState.CreateWithEtag(null)));
 
             // try to write new state with different etag;
-            await Assert.ThrowsAsync<InconsistentStateException>(() => memoryStorageGrain.WriteStateAsync("grain", "id", TestGrainState.CreateWithEtag(newEtag+"a")));
+            ex = await Assert.ThrowsAsync<MemoryStorageEtagMismatchException>(() => memoryStorageGrain.WriteStateAsync("grain", "id", TestGrainState.CreateWithEtag(newEtag+"a")));
 
             // Write new state with good etag;
             string latestEtag = await memoryStorageGrain.WriteStateAsync("grain", "id", TestGrainState.CreateWithEtag(newEtag));
             Assert.NotNull(latestEtag);
 
             // try delete state with null etag
-            await Assert.ThrowsAsync<InconsistentStateException>(() => memoryStorageGrain.DeleteStateAsync("grain", "id", null));
+            ex = await Assert.ThrowsAsync<MemoryStorageEtagMismatchException>(() => memoryStorageGrain.DeleteStateAsync("grain", "id", null));
 
             // try delete state with wrong etag
-            await Assert.ThrowsAsync<InconsistentStateException>(() => memoryStorageGrain.DeleteStateAsync("grain", "id", latestEtag+"a"));
+            ex = await Assert.ThrowsAsync<MemoryStorageEtagMismatchException>(() => memoryStorageGrain.DeleteStateAsync("grain", "id", latestEtag+"a"));
 
             // delete state
             await memoryStorageGrain.DeleteStateAsync("grain", "id", latestEtag);
@@ -90,10 +102,10 @@ namespace DefaultCluster.Tests.StorageTests
             Assert.Null(grainState);
 
             // try delete already deleted grain state
-            await Assert.ThrowsAsync<InconsistentStateException>(() => memoryStorageGrain.DeleteStateAsync("grain", "id", latestEtag));
+            ex = await Assert.ThrowsAsync<MemoryStorageEtagMismatchException>(() => memoryStorageGrain.DeleteStateAsync("grain", "id", latestEtag));
 
             // try to write state to deleted state.
-            await Assert.ThrowsAsync<InconsistentStateException>(() => memoryStorageGrain.WriteStateAsync("grain", "id", TestGrainState.CreateWithEtag(latestEtag)));
+            ex = await Assert.ThrowsAsync<MemoryStorageEtagMismatchException>(() => memoryStorageGrain.WriteStateAsync("grain", "id", TestGrainState.CreateWithEtag(latestEtag)));
 
             // Make sure we can write new state to a deleted state
             await memoryStorageGrain.WriteStateAsync("grain", "id", TestGrainState.CreateWithEtag(null));
@@ -121,6 +133,7 @@ namespace DefaultCluster.Tests.StorageTests
             }
 
             public object State { get; set; }
+            public Type Type => typeof(int);
             public string ETag { get; set; }
         }
     }

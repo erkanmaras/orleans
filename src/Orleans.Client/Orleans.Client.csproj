@@ -1,0 +1,9 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <PackageId>Microsoft.Orleans.Client</PackageId>
+    <Title>Microsoft Orleans Client Libraries</Title>
+    <Description>Collection of Microsoft Orleans libraries and files needed on the client.</Description>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+  </PropertyGroup>
+
+</Project>

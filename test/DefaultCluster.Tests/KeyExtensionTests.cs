@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using Orleans;
 using Orleans.Runtime;
 using TestExtensions;
@@ -57,7 +58,7 @@ namespace DefaultCluster.Tests.General
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("PrimaryKeyExtension")]
         public void EmptyKeyExtensionsAreDisallowed()
         {
-            Xunit.Assert.Throws(typeof(ArgumentException), () =>
+            Assert.Throws<ArgumentException>(() =>
             {
                 var baseKey = Guid.NewGuid();
 
@@ -68,7 +69,7 @@ namespace DefaultCluster.Tests.General
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("PrimaryKeyExtension")]
         public void WhiteSpaceKeyExtensionsAreDisallowed()
         {
-            Xunit.Assert.Throws(typeof(ArgumentException), () =>
+            Assert.Throws<ArgumentException>(() =>
             {
                 var baseKey = Guid.NewGuid();
 
@@ -79,7 +80,7 @@ namespace DefaultCluster.Tests.General
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("PrimaryKeyExtension")]
         public void NullKeyExtensionsAreDisallowed()
         {
-            Xunit.Assert.Throws(typeof(ArgumentNullException), () =>
+            Assert.Throws<ArgumentNullException>(() =>
             {
                 var baseKey = Guid.NewGuid();
 
@@ -109,6 +110,41 @@ namespace DefaultCluster.Tests.General
             var key2 = ((GrainReference) grain).GetPrimaryKeyString();
 
             Assert.Equal(key, key2); // Unexpected key was returned.
+        }
+
+        [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("PrimaryKeyExtension")]
+        public void KeysAllowPlusSymbols()
+        {
+            const string key = "foo+bar+zaz";
+
+            {
+                // Verify that grains with string keys can include + symbols in their key.
+                var grain = this.GrainFactory.GetGrain<IStringGrain>(key);
+                var grainRef = (GrainReference) grain;
+                var key2 = grainRef.GetPrimaryKeyString();
+                Assert.Equal(key, key2);
+
+                var grainRef2 = GrainReference.FromKeyString(
+                    grainRef.ToKeyString(),
+                    this.Client.ServiceProvider.GetRequiredService<IGrainReferenceRuntime>());
+                Assert.True(grainRef.Equals(grainRef2));
+            }
+
+            {
+                // Verify that grains with compound keys can include + symbols in their key extension.
+                var primaryKey = Guid.NewGuid();
+                var grain = this.GrainFactory.GetGrain<IKeyExtensionTestGrain>(primaryKey, keyExtension: key);
+                string keyExt;
+                var grainRef = (GrainReference) grain;
+                var actualPrimaryKey = grainRef.GetPrimaryKey(out keyExt);
+                Assert.Equal(primaryKey, actualPrimaryKey);
+                Assert.Equal(key, keyExt);
+
+                var grainRef2 = GrainReference.FromKeyString(
+                    grainRef.ToKeyString(),
+                    this.Client.ServiceProvider.GetRequiredService<IGrainReferenceRuntime>());
+                Assert.True(grainRef.Equals(grainRef2));
+            }
         }
 
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("PrimaryKeyExtension")]

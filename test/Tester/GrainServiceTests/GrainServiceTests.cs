@@ -1,13 +1,10 @@
-﻿using System;
-using System.Collections.Generic;
 using System.Threading.Tasks;
-using Microsoft.Extensions.DependencyInjection;
+using Xunit;
 using Orleans;
-using Orleans.Runtime.Configuration;
 using Orleans.TestingHost;
+using Orleans.Hosting;
 using TestExtensions;
 using UnitTests.GrainInterfaces;
-using Xunit;
 
 namespace Tester
 {
@@ -15,14 +12,18 @@ namespace Tester
     {
         public class Fixture : BaseTestClusterFixture
         {
-            protected override TestCluster CreateTestCluster()
+            protected override void ConfigureTestCluster(TestClusterBuilder builder)
             {
-                var options = new TestClusterOptions(1);
-                options.ClusterConfiguration.UseStartupType<GrainServiceStartup>();
-                options.ClusterConfiguration.Globals.RegisterGrainService("CustomGrainService", "Tester.CustomGrainService, Tester",
-                    new Dictionary<string, string> { { "test-property", "xyz" } });
+                builder.Options.InitialSilosCount = 1;
+                builder.AddSiloBuilderConfigurator<GrainServiceSiloBuilderConfigurator>();
+            }
 
-                return new TestCluster(options);
+            private class GrainServiceSiloBuilderConfigurator : ISiloBuilderConfigurator
+            {
+                public void Configure(ISiloHostBuilder hostBuilder)
+                {
+                    hostBuilder.AddTestGrainService("abc").AddGrainExtension<IEchoExtension, EchoExtension>();
+                }
             }
         }
 
@@ -38,9 +39,9 @@ namespace Tester
         {
             IGrainServiceTestGrain grain = this.GrainFactory.GetGrain<IGrainServiceTestGrain>(0);
             var grainId = await grain.GetHelloWorldUsingCustomService();
-            Assert.Equal("Hello World from Grain Service", grainId);
-            var prop = await grain.GetServiceConfigProperty("test-property");
-            Assert.Equal("xyz", prop);
+            Assert.Equal("Hello World from Test Grain Service", grainId);
+            var prop = await grain.GetServiceConfigProperty();
+            Assert.Equal("abc", prop);
         }
 
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("GrainServices")]
@@ -66,15 +67,21 @@ namespace Tester
             var prop = await grain.CallHasInit();
             Assert.True(prop);
         }
-    }
 
-
-    public class GrainServiceStartup
-    {
-        public IServiceProvider ConfigureServices(IServiceCollection services)
+        [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("GrainServices")]
+        public async Task GrainServiceExtensionTest()
         {
-            services.AddSingleton<ICustomGrainServiceClient, CustomGrainServiceClient>();
-            return services.BuildServiceProvider();
+            IGrainServiceTestGrain grain = GrainFactory.GetGrain<IGrainServiceTestGrain>(0);
+            var what = await grain.EchoViaExtension("what");
+            Assert.Equal("what", what);
+        }
+
+        public class EchoExtension : IEchoExtension
+        {
+            public Task<string> Echo(string what)
+            {
+                return Task.FromResult(what);
+            }
         }
     }
 }

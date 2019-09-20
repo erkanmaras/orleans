@@ -1,8 +1,10 @@
-﻿
+
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Orleans.Providers.Streams.Common;
 using Orleans.Streams;
 using Orleans.TestingHost.Utils;
@@ -25,14 +27,7 @@ namespace UnitTests.OrleansRuntime.Streams
             public string StreamNamespace;
             public long SequenceNumber;
             public readonly byte[] Data = FixedMessage;
-        }
-
-        private struct TestCachedMessage
-        {
-            public Guid StreamGuid;
-            public string StreamNamespace;
-            public long SequenceNumber;
-            public ArraySegment<byte> Payload;
+            public DateTime EnqueueTimeUtc = DateTime.UtcNow;
         }
 
         private class TestBatchContainer : IBatchContainer
@@ -58,122 +53,90 @@ namespace UnitTests.OrleansRuntime.Streams
             }
         }
 
-        private class TestCacheDataComparer : ICacheDataComparer<TestCachedMessage>
+
+        private class TestCacheDataAdapter : ICacheDataAdapter
         {
-            public static readonly ICacheDataComparer<TestCachedMessage> Instance = new TestCacheDataComparer();
-
-            public int Compare(TestCachedMessage cachedMessage, StreamSequenceToken token)
+            public IBatchContainer GetBatchContainer(ref CachedMessage cachedMessage)
             {
-                var realToken = (EventSequenceTokenV2)token;
-                return cachedMessage.SequenceNumber != realToken.SequenceNumber
-                    ? (int)(cachedMessage.SequenceNumber - realToken.SequenceNumber)
-                    : 0 - realToken.EventIndex;
-            }
+                //Deserialize payload
+                int readOffset = 0;
+                ArraySegment<byte> payload = SegmentBuilder.ReadNextBytes(cachedMessage.Segment, ref readOffset);
 
-            public bool Equals(TestCachedMessage cachedMessage, IStreamIdentity streamIdentity)
-            {
-                int results = cachedMessage.StreamGuid.CompareTo(streamIdentity.Guid);
-                return results == 0 && string.Compare(cachedMessage.StreamNamespace, streamIdentity.Namespace, StringComparison.Ordinal)==0;
-            }
-        }
-
-        private class TestCacheDataAdapter : ICacheDataAdapter<TestQueueMessage, TestCachedMessage>
-        {
-            private readonly IObjectPool<FixedSizeBuffer> bufferPool;
-            private FixedSizeBuffer currentBuffer;
-
-            public Action<IDisposable> PurgeAction { private get; set; }
-
-            public TestCacheDataAdapter(IObjectPool<FixedSizeBuffer> bufferPool)
-            {
-                if (bufferPool == null)
-                {
-                    throw new ArgumentNullException(nameof(bufferPool));
-                }
-                this.bufferPool = bufferPool;
-            }
-
-            public StreamPosition QueueMessageToCachedMessage(ref TestCachedMessage cachedMessage, TestQueueMessage queueMessage, DateTime dequeueTimeUtc)
-            {
-                StreamPosition streamPosition = GetStreamPosition(queueMessage);
-                cachedMessage.StreamGuid = streamPosition.StreamIdentity.Guid;
-                cachedMessage.StreamNamespace = streamPosition.StreamIdentity.Namespace;
-                cachedMessage.SequenceNumber = queueMessage.SequenceNumber;
-                cachedMessage.Payload = SerializeMessageIntoPooledSegment(queueMessage);
-                return streamPosition;
-            }
-
-            // Placed object message payload into a segment from a buffer pool.  When this get's too big, older blocks will be purged
-            private ArraySegment<byte> SerializeMessageIntoPooledSegment(TestQueueMessage queueMessage)
-            {
-                // get segment from current block
-                ArraySegment<byte> segment;
-                if (currentBuffer == null || !currentBuffer.TryGetSegment(queueMessage.Data.Length, out segment))
-                {
-                    // no block or block full, get new block and try again
-                    currentBuffer = bufferPool.Allocate();
-                    currentBuffer.SetPurgeAction(PurgeAction);
-                    // if this fails with clean block, then requested size is too big
-                    if (!currentBuffer.TryGetSegment(queueMessage.Data.Length, out segment))
-                    {
-                        string errmsg = String.Format(CultureInfo.InvariantCulture,
-                            "Message size is to big. MessageSize: {0}", queueMessage.Data.Length);
-                        throw new ArgumentOutOfRangeException("queueMessage", errmsg);
-                    }
-                }
-                Buffer.BlockCopy(queueMessage.Data, 0, segment.Array, segment.Offset, queueMessage.Data.Length);
-                return segment;
-            }
-
-            public IBatchContainer GetBatchContainer(ref TestCachedMessage cachedMessage)
-            {
                 return new TestBatchContainer
                 {
                     StreamGuid =  cachedMessage.StreamGuid,
                     StreamNamespace = cachedMessage.StreamNamespace,
                     SequenceToken = GetSequenceToken(ref cachedMessage),
-                    Data = cachedMessage.Payload.ToArray()
+                    Data = payload.ToArray()
                 };
             }
 
-            public StreamSequenceToken GetSequenceToken(ref TestCachedMessage cachedMessage)
+            public StreamSequenceToken GetSequenceToken(ref CachedMessage cachedMessage)
             {
                 return new EventSequenceTokenV2(cachedMessage.SequenceNumber);
             }
 
-            public StreamPosition GetStreamPosition(TestQueueMessage queueMessage)
+        }
+
+        private class CachedMessageConverter
+        {
+            private readonly IObjectPool<FixedSizeBuffer> bufferPool;
+            private readonly IEvictionStrategy evictionStrategy;
+            private FixedSizeBuffer currentBuffer;
+
+
+            public CachedMessageConverter(IObjectPool<FixedSizeBuffer> bufferPool, IEvictionStrategy evictionStrategy)
+            {
+                this.bufferPool = bufferPool;
+                this.evictionStrategy = evictionStrategy;
+            }
+
+            public CachedMessage ToCachedMessage(TestQueueMessage queueMessage, DateTime dequeueTimeUtc)
+            {
+                StreamPosition streamPosition = GetStreamPosition(queueMessage);
+                return new CachedMessage
+                {
+                    StreamGuid = streamPosition.StreamIdentity.Guid,
+                    StreamNamespace = streamPosition.StreamIdentity.Namespace != null ? string.Intern(streamPosition.StreamIdentity.Namespace) : null,
+                    SequenceNumber = queueMessage.SequenceNumber,
+                    EnqueueTimeUtc = queueMessage.EnqueueTimeUtc,
+                    DequeueTimeUtc = dequeueTimeUtc,
+                    Segment = SerializeMessageIntoPooledSegment(queueMessage),
+                };
+            }
+
+            private StreamPosition GetStreamPosition(TestQueueMessage queueMessage)
             {
                 IStreamIdentity streamIdentity = new StreamIdentity(queueMessage.StreamGuid, queueMessage.StreamNamespace);
                 StreamSequenceToken sequenceToken = new EventSequenceTokenV2(queueMessage.SequenceNumber);
                 return new StreamPosition(streamIdentity, sequenceToken);
             }
 
-            public bool ShouldPurge(ref TestCachedMessage cachedMessage, ref TestCachedMessage newestCachedMessage, IDisposable purgeRequest, DateTime nowUtc)
+            private ArraySegment<byte> SerializeMessageIntoPooledSegment(TestQueueMessage queueMessage)
             {
-                var purgedResource = (FixedSizeBuffer)purgeRequest;
-                // if we're purging our current buffer, don't use it any more
-                if (currentBuffer != null && currentBuffer.Id == purgedResource.Id)
-                {
-                    currentBuffer = null;
-                }
-                return cachedMessage.Payload.Array == purgedResource.Id;
-            }
-        }
+                // serialize payload
+                int size = SegmentBuilder.CalculateAppendSize(queueMessage.Data);
 
-        private class TestBlockPool : FixedSizeObjectPool<FixedSizeBuffer>
-        {
-            // 10 buffers of 1k each
-            public TestBlockPool()
-                : base(PooledBufferCount, () => new FixedSizeBuffer(PooledBufferSize))
-            {
-            }
-
-            public void PurgeAll()
-            {
-                while (usedObjects.Count != 0)
+                // get segment from current block
+                ArraySegment<byte> segment;
+                if (currentBuffer == null || !currentBuffer.TryGetSegment(size, out segment))
                 {
-                    usedObjects.Dequeue().SignalPurge();
+                    // no block or block full, get new block and try again
+                    currentBuffer = bufferPool.Allocate();
+                    //call EvictionStrategy's OnBlockAllocated method
+                    this.evictionStrategy.OnBlockAllocated(currentBuffer);
+                    // if this fails with clean block, then requested size is too big
+                    if (!currentBuffer.TryGetSegment(size, out segment))
+                    {
+                        string errmsg = String.Format(CultureInfo.InvariantCulture,
+                            "Message size is too big. MessageSize: {0}", size);
+                        throw new ArgumentOutOfRangeException(nameof(queueMessage), errmsg);
+                    }
                 }
+                // encode namespace, offset, partitionkey, properties and payload into segment
+                int writeOffset = 0;
+                SegmentBuilder.Append(segment, ref writeOffset, queueMessage.Data);
+                return segment;
             }
         }
 
@@ -186,11 +149,14 @@ namespace UnitTests.OrleansRuntime.Streams
         [Fact, TestCategory("BVT"), TestCategory("Streaming")]
         public void GoldenPathTest()
         {
-            var bufferPool = new TestBlockPool();
-            var dataAdapter = new TestCacheDataAdapter(bufferPool);
-            var cache = new PooledQueueCache<TestQueueMessage, TestCachedMessage>(dataAdapter, TestCacheDataComparer.Instance, NoOpTestLogger.Instance);
-            dataAdapter.PurgeAction = cache.Purge;
-            RunGoldenPath(cache, 111);
+            var bufferPool = new ObjectPool<FixedSizeBuffer>(() => new FixedSizeBuffer(PooledBufferSize));
+            var dataAdapter = new TestCacheDataAdapter();
+            var cache = new PooledQueueCache(dataAdapter, NullLogger.Instance, null, null);
+            var evictionStrategy = new ChronologicalEvictionStrategy(NullLogger.Instance, new TimePurgePredicate(TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(10)), null, null);
+            evictionStrategy.PurgeObservable = cache;
+            var converter = new CachedMessageConverter(bufferPool, evictionStrategy);
+
+            RunGoldenPath(cache, converter, 111);
         }
 
         /// <summary>
@@ -200,17 +166,19 @@ namespace UnitTests.OrleansRuntime.Streams
         [Fact, TestCategory("BVT"), TestCategory("Streaming")]
         public void CacheDrainTest()
         {
-            var bufferPool = new TestBlockPool();
-            var dataAdapter = new TestCacheDataAdapter(bufferPool);
-            var cache = new PooledQueueCache<TestQueueMessage, TestCachedMessage>(dataAdapter, TestCacheDataComparer.Instance, NoOpTestLogger.Instance);
-            dataAdapter.PurgeAction = cache.Purge;
+            var bufferPool = new ObjectPool<FixedSizeBuffer>(() => new FixedSizeBuffer(PooledBufferSize));
+            var dataAdapter = new TestCacheDataAdapter();
+            var cache = new PooledQueueCache(dataAdapter, NullLogger.Instance, null, null);
+            var evictionStrategy = new ChronologicalEvictionStrategy(NullLogger.Instance, new TimePurgePredicate(TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(10)), null, null);
+            evictionStrategy.PurgeObservable = cache;
+            var converter = new CachedMessageConverter(bufferPool, evictionStrategy);
+
             int startSequenceNuber = 222;
-            startSequenceNuber = RunGoldenPath(cache, startSequenceNuber);
-            bufferPool.PurgeAll();
-            RunGoldenPath(cache, startSequenceNuber);
+            startSequenceNuber = RunGoldenPath(cache, converter, startSequenceNuber);
+            RunGoldenPath(cache, converter, startSequenceNuber);
         }
 
-        private int RunGoldenPath(PooledQueueCache<TestQueueMessage, TestCachedMessage> cache, int startOfCache)
+        private int RunGoldenPath(PooledQueueCache cache, CachedMessageConverter converter, int startOfCache)
         {
             int sequenceNumber = startOfCache;
             IBatchContainer batch;
@@ -220,15 +188,20 @@ namespace UnitTests.OrleansRuntime.Streams
 
             // now add messages into cache newer than cursor
             // Adding enough to fill the pool
-            for (int i = 0; i < MessagesPerBuffer * PooledBufferCount; i++)
-            {
-                cache.Add(new TestQueueMessage
+            List<TestQueueMessage> messages = Enumerable.Range(0, MessagesPerBuffer * PooledBufferCount)
+                .Select(i => new TestQueueMessage
                 {
                     StreamGuid = i % 2 == 0 ? stream1.Guid : stream2.Guid,
                     StreamNamespace = TestStreamNamespace,
-                    SequenceNumber = sequenceNumber++,
-                }, DateTime.UtcNow);
-            }
+                    SequenceNumber = sequenceNumber + i
+                })
+                .ToList();
+            DateTime utcNow = DateTime.UtcNow;
+            List<CachedMessage> cachedMessages = messages
+                .Select(m => converter.ToCachedMessage(m, utcNow))
+                .ToList();
+            cache.Add(cachedMessages, utcNow);
+            sequenceNumber += MessagesPerBuffer * PooledBufferCount;
 
             // get cursor for stream1, walk all the events in the stream using the cursor
             object stream1Cursor = cache.GetCursor(stream1, new EventSequenceTokenV2(startOfCache));
@@ -261,15 +234,20 @@ namespace UnitTests.OrleansRuntime.Streams
             // Add a blocks worth of events to the cache, then walk each cursor.  Do this enough times to fill the cache twice.
             for (int j = 0; j < PooledBufferCount*2; j++)
             {
-                for (int i = 0; i < MessagesPerBuffer; i++)
+                List<TestQueueMessage> moreMessages = Enumerable.Range(0, MessagesPerBuffer)
+                .Select(i => new TestQueueMessage
                 {
-                    cache.Add(new TestQueueMessage
-                    {
-                        StreamGuid = i % 2 == 0 ? stream1.Guid : stream2.Guid,
-                        StreamNamespace = TestStreamNamespace,
-                        SequenceNumber = sequenceNumber++,
-                    }, DateTime.UtcNow);
-                }
+                    StreamGuid = i % 2 == 0 ? stream1.Guid : stream2.Guid,
+                    StreamNamespace = TestStreamNamespace,
+                    SequenceNumber = sequenceNumber + i
+                })
+                .ToList();
+                utcNow = DateTime.UtcNow;
+                List<CachedMessage> moreCachedMessages = moreMessages
+                    .Select(m => converter.ToCachedMessage(m, utcNow))
+                    .ToList();
+                cache.Add(moreCachedMessages, utcNow);
+                sequenceNumber += MessagesPerBuffer;
 
                 // walk all the events in the stream using the cursor
                 while (cache.TryGetNextMessage(stream1Cursor, out batch))
@@ -296,89 +274,6 @@ namespace UnitTests.OrleansRuntime.Streams
                 Assert.Equal((sequenceNumber - startOfCache) / 2, stream2EventCount);
             }
             return sequenceNumber;
-        }
-
-        [Fact, TestCategory("BVT"), TestCategory("Streaming")]
-        public void QueueCacheMissTest()
-        {
-            var bufferPool = new TestBlockPool();
-            var dataAdapter = new TestCacheDataAdapter(bufferPool);
-            var cache = new PooledQueueCache<TestQueueMessage, TestCachedMessage>(dataAdapter, TestCacheDataComparer.Instance, NoOpTestLogger.Instance);
-            dataAdapter.PurgeAction = cache.Purge;
-            int sequenceNumber = 10;
-            IBatchContainer batch;
-
-            IStreamIdentity streamId = new StreamIdentity(Guid.NewGuid(), TestStreamNamespace);
-
-            // No data in cache, cursors should not throw.
-            object cursor = cache.GetCursor(streamId, new EventSequenceTokenV2(sequenceNumber++));
-            Assert.NotNull(cursor);
-
-            // try to iterate, should throw
-            bool gotNext = cache.TryGetNextMessage(cursor, out batch);
-            Assert.NotNull(cursor);
-            Assert.False(gotNext);
-
-            // now add messages into cache newer than cursor
-            // Adding enough to fill the pool
-            for (int i = 0; i < MessagesPerBuffer * PooledBufferCount; i++)
-            {
-                cache.Add(new TestQueueMessage
-                {
-                    StreamGuid = streamId.Guid,
-                    StreamNamespace = TestStreamNamespace,
-                    SequenceNumber = sequenceNumber++,
-                }, DateTime.UtcNow);
-            }
-
-            // now that there is data, and the cursor should point to data older than in the cache, using cursor should throw
-            Exception ex = null;
-            try
-            {
-                cache.TryGetNextMessage(cursor, out batch);
-            }
-            catch (QueueCacheMissException cacheMissException)
-            {
-                ex = cacheMissException;
-            }
-            Assert.NotNull(ex);
-
-            // Try getting new cursor into cache from data before the cache.  Should throw
-            ex = null;
-            try
-            {
-                cache.GetCursor(streamId, new EventSequenceTokenV2(10));
-            }
-            catch (QueueCacheMissException cacheMissException)
-            {
-                ex = cacheMissException;
-            }
-            Assert.NotNull(ex);
-
-            // Get valid cursor into cache
-            cursor = cache.GetCursor(streamId, new EventSequenceTokenV2(13));
-            // query once, to make sure cursor is good
-            gotNext = cache.TryGetNextMessage(cursor, out batch);
-            Assert.NotNull(cursor);
-            Assert.True(gotNext);
-            // Since pool should be full, adding one more message should trigger the cache to purge.  
-            cache.Add(new TestQueueMessage
-            {
-                StreamGuid = streamId.Guid,
-                StreamNamespace = TestStreamNamespace,
-                SequenceNumber = sequenceNumber,
-            }, DateTime.UtcNow);
-            // After purge, use of cursor should throw.
-            ex = null;
-            try
-            {
-                cache.TryGetNextMessage(cursor, out batch);
-            }
-            catch (QueueCacheMissException cacheMissException)
-            {
-                ex = cacheMissException;
-            }
-            Assert.NotNull(ex);
         }
     }
 }

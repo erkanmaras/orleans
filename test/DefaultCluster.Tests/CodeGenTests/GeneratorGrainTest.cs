@@ -282,6 +282,14 @@ namespace Tester.CodeGenTests
             Assert.Equal("ToastedEnchiladas", await localObject.ValueTask);
         }
 
+        [Fact]
+        public async Task GrainWithValueTaskMethod()
+        {
+            var grain = this.GrainFactory.GetGrain<IGrainWithGenericMethods>(Guid.NewGuid());
+            Assert.Equal(1, await grain.ValueTaskMethod(true).ConfigureAwait(false));
+            Assert.Equal(2, await grain.ValueTaskMethod(false).ConfigureAwait(false));
+        }
+
         private class ObserverWithGenericMethods : IGrainObserverWithGenericMethods
         {
             private readonly TaskCompletionSource<object> valueCompletion = new TaskCompletionSource<object>();
@@ -294,8 +302,6 @@ namespace Tester.CodeGenTests
             }
         }
 
-#if !EXCLUDEFSHARP
-#if !NETSTANDARD_TODO
         [Fact, TestCategory("FSharp")]
         public async Task CodeGenDerivedFromFSharpInterfaceInDifferentAssembly()
         {
@@ -304,7 +310,5 @@ namespace Tester.CodeGenTests
             var output = await grain.Echo(input);
             Assert.Equal(input, output);
         }
-#endif
-#endif
     }
 }

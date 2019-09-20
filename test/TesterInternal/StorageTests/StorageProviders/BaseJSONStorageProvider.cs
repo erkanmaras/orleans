@@ -1,4 +1,4 @@
-﻿//*********************************************************
+//*********************************************************
 //    Copyright (c) Microsoft. All rights reserved.
 //    
 //    Apache 2.0 License
@@ -27,16 +27,8 @@ namespace Samples.StorageProviders
     /// <summary>
     /// Base class for JSON-based grain storage providers.
     /// </summary>
-    public abstract class BaseJSONStorageProvider : IStorageProvider
+    public abstract class BaseJSONStorageProvider : IGrainStorage
     {
-        /// <summary>
-        /// Logger object
-        /// </summary>
-        public Logger Log
-        {
-            get; protected set;
-        }
-
         /// <summary>
         /// Storage provider name
         /// </summary>
@@ -56,19 +48,6 @@ namespace Samples.StorageProviders
         }
 
         /// <summary>
-        /// Initializes the storage provider.
-        /// </summary>
-        /// <param name="name">The name of this provider instance.</param>
-        /// <param name="providerRuntime">A Orleans runtime object managing all storage providers.</param>
-        /// <param name="config">Configuration info for this provider instance.</param>
-        /// <returns>Completion promise for this operation.</returns>
-        public virtual Task Init(string name, IProviderRuntime providerRuntime, IProviderConfiguration config)
-        {
-            Log = providerRuntime.GetLogger(this.GetType().FullName);
-            return TaskDone.Done;
-        }
-
-        /// <summary>
         /// Closes the storage provider during silo shutdown.
         /// </summary>
         /// <returns>Completion promise for this operation.</returns>
@@ -77,11 +56,11 @@ namespace Samples.StorageProviders
             if (DataManager != null)
                 DataManager.Dispose();
             DataManager = null;
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         /// <summary>
-        /// Reads persisted state from the backing store and deserializes it into the the target
+        /// Reads persisted state from the backing store and deserializes it into the target
         /// grain state object.
         /// </summary>
         /// <param name="grainType">A string holding the name of the grain class.</param>
@@ -123,7 +102,7 @@ namespace Samples.StorageProviders
         {
             if (DataManager == null) throw new ArgumentException("DataManager property not initialized");
             DataManager.Delete(grainState.GetType().Name, grainReference.ToKeyString());
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         /// <summary>
@@ -145,7 +124,7 @@ namespace Samples.StorageProviders
         /// Constructs a grain state instance by deserializing a JSON document.
         /// </summary>
         /// <param name="grainState">Grain state to be populated for storage.</param>
-        /// <param name="entityData">JSON storage format representaiton of the grain state.</param>
+        /// <param name="entityData">JSON storage format representation of the grain state.</param>
         protected static void ConvertFromStorageFormat(IGrainState grainState, string entityData)
         {
             JavaScriptSerializer deserializer = new JavaScriptSerializer();

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Microsoft.Extensions.Logging;
 using Orleans.Runtime;
 using Orleans.Streams;
 
@@ -12,7 +13,7 @@ namespace Orleans.Providers.Streams.Common
     {
         private readonly IStreamIdentity streamIdentity;
         private readonly SimpleQueueCache cache;
-        private readonly Logger logger;
+        private readonly ILogger logger;
         private IBatchContainer current; // this is a pointer to the current element in the cache. It is what will be returned by GetCurrent().
 
         // This is a pointer to the NEXT element in the cache.
@@ -43,7 +44,7 @@ namespace Orleans.Providers.Streams.Common
         /// <param name="cache"></param>
         /// <param name="streamIdentity"></param>
         /// <param name="logger"></param>
-        public SimpleQueueCacheCursor(SimpleQueueCache cache, IStreamIdentity streamIdentity, Logger logger)
+        public SimpleQueueCacheCursor(SimpleQueueCache cache, IStreamIdentity streamIdentity, ILogger logger)
         {
             if (cache == null)
             {
@@ -76,7 +77,7 @@ namespace Orleans.Providers.Streams.Common
         /// <summary>
         /// Move to next message in the stream.
         /// If it returns false, there are no more messages.  The enumerator is still
-        ///  valid howerver and can be called again when more data has come in on this
+        ///  valid however and can be called again when more data has come in on this
         ///  stream.
         /// </summary>
         /// <returns></returns>
@@ -125,8 +126,6 @@ namespace Orleans.Providers.Streams.Common
                     string.Equals(batchContainer.StreamNamespace, streamIdentity.Namespace);
         }
 
-        #region IDisposable Members
-
         /// <summary>
         /// Performs application-defined tasks associated with freeing, releasing, or resetting unmanaged resources.
         /// </summary>
@@ -146,8 +145,6 @@ namespace Orleans.Providers.Streams.Common
                 cache.UnsetCursor(this, null);
             }
         }
-
-        #endregion
 
         /// <summary>
         /// Convert object to string

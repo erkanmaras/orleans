@@ -1,4 +1,4 @@
-﻿//#define REREAD_STATE_AFTER_WRITE_FAILED
+//#define REREAD_STATE_AFTER_WRITE_FAILED
 
 using System;
 using System.Collections.Generic;
@@ -7,7 +7,6 @@ using System.Linq;
 using System.Threading.Tasks;
 using Orleans;
 using Orleans.Runtime;
-using Orleans.Serialization;
 using Orleans.Storage;
 using Orleans.TestingHost;
 using UnitTests.GrainInterfaces;
@@ -17,6 +16,8 @@ using Xunit.Abstractions;
 using Orleans.Runtime.Configuration;
 using TesterInternal;
 using TestExtensions;
+using Orleans.Hosting;
+using Microsoft.Extensions.DependencyInjection;
 
 // ReSharper disable RedundantAssignment
 // ReSharper disable UnusedVariable
@@ -32,16 +33,22 @@ namespace UnitTests.StorageTests
         public class Fixture : BaseTestClusterFixture
         {
 
-            protected override TestCluster CreateTestCluster()
+            protected override void ConfigureTestCluster(TestClusterBuilder builder)
             {
-                var options = new TestClusterOptions(initialSilosCount: 1);
-                options.ClusterConfiguration.Globals.RegisterStorageProvider<MockStorageProvider>(MockStorageProviderName1);
-                options.ClusterConfiguration.Globals.RegisterStorageProvider<MockStorageProvider>(MockStorageProviderName2, new Dictionary<string, string> { { "Config1", "1" }, { "Config2", "2" } });
-                options.ClusterConfiguration.Globals.RegisterStorageProvider<ErrorInjectionStorageProvider>(ErrorInjectorProviderName);
-                options.ClusterConfiguration.Globals.RegisterStorageProvider<MockStorageProvider>(MockStorageProviderNameLowerCase);
-                options.ClusterConfiguration.AddMemoryStorageProvider("MemoryStore");
+                builder.Options.InitialSilosCount = 1;
+                builder.AddSiloBuilderConfigurator<SiloConfigurator>();
+            }
 
-                return new TestCluster(options);
+            private class SiloConfigurator : ISiloBuilderConfigurator
+            {
+                public void Configure(ISiloHostBuilder hostBuilder)
+                {
+                    hostBuilder.AddMemoryGrainStorage("MemoryStore");
+                    hostBuilder.AddTestStorageProvider(MockStorageProviderName1, (sp, name) => ActivatorUtilities.CreateInstance<MockStorageProvider>(sp, name));
+                    hostBuilder.AddTestStorageProvider(MockStorageProviderName2, (sp, name) => ActivatorUtilities.CreateInstance<MockStorageProvider>(sp, name));
+                    hostBuilder.AddTestStorageProvider(MockStorageProviderNameLowerCase, (sp, name) => ActivatorUtilities.CreateInstance<MockStorageProvider>(sp, name));
+                    hostBuilder.AddTestStorageProvider(ErrorInjectorProviderName, (sp, name) => ActivatorUtilities.CreateInstance<ErrorInjectionStorageProvider>(sp));
+                }
             }
         }
 
@@ -125,7 +132,7 @@ namespace UnitTests.StorageTests
             object[] replies = await mgmtGrain.SendControlCommandToProvider(typeof(MockStorageProvider).FullName,
                MockStorageProviderName1, (int)MockStorageProvider.Commands.InitCount, null);
 
-            Assert.True(replies.Contains(1)); // StorageProvider #Init
+            Assert.Contains(1, replies); // StorageProvider #Init
         }
 
         [Fact, TestCategory("Functional"), TestCategory("Persistence")]
@@ -180,7 +187,7 @@ namespace UnitTests.StorageTests
 
             SetErrorInjection(providerName, ErrorInjectionPoint.BeforeRead);
 
-            await Assert.ThrowsAsync<OrleansException>(() =>
+            await Assert.ThrowsAsync<StorageProviderInjectedError>(() =>
                 grain.GetValue());
         }
 
@@ -361,7 +368,7 @@ namespace UnitTests.StorageTests
             await grain.DoDelete();
             providerState = GetStateForStorageProviderInUse(providerName, typeof(MockStorageProvider).FullName);
             Assert.Equal(initialDeleteCount + 1, providerState.ProviderStateForTest.DeleteCount); // StorageProvider #Deletes
-            Assert.Equal(null, providerState.LastStoredGrainState); // Store-AfterDelete-Empty
+            Assert.Null(providerState.LastStoredGrainState); // Store-AfterDelete-Empty
 
             int val = await grain.GetValue(); // Returns current in-memory null data without re-read.
             providerState = GetStateForStorageProviderInUse(providerName, typeof(MockStorageProvider).FullName); // update state
@@ -699,6 +706,74 @@ namespace UnitTests.StorageTests
         }
 
         [Fact, TestCategory("Functional"), TestCategory("Persistence")]
+        public async Task Persistence_Provider_InconsistentStateException_DeactivatesGrain()
+        {
+            Guid id = Guid.NewGuid();
+            string providerName = ErrorInjectorProviderName;
+            IPersistenceProviderErrorGrain grain = this.HostedCluster.GrainFactory.GetGrain<IPersistenceProviderErrorGrain>(id);
+
+            var val = await grain.GetValue();
+
+            int expectedVal = 62;
+            var originalActivationId = await grain.GetActivationId();
+            await grain.DoWrite(expectedVal);
+            var providerState = GetStateForStorageProviderInUse(providerName, typeof(ErrorInjectionStorageProvider).FullName);
+            Assert.Equal(expectedVal, providerState.LastStoredGrainState.Field1); // Store-Field1
+
+            const int attemptedVal3 = 63;
+            SetErrorInjection(providerName, new ErrorInjectionBehavior
+            {
+                ErrorInjectionPoint = ErrorInjectionPoint.BeforeWrite,
+                ExceptionType = typeof(InconsistentStateException)
+            });
+            CheckStorageProviderErrors(() => grain.DoWrite(attemptedVal3), typeof(InconsistentStateException));
+
+            // Stored value unchanged
+            providerState = GetStateForStorageProviderInUse(providerName, typeof(ErrorInjectionStorageProvider).FullName);
+            Assert.Equal(expectedVal, providerState.LastStoredGrainState.Field1); // Store-Field1
+            Assert.NotEqual(originalActivationId, await grain.GetActivationId());
+
+            SetErrorInjection(providerName, ErrorInjectionPoint.None);
+            val = await grain.GetValue();
+            // Stored value unchanged
+            providerState = GetStateForStorageProviderInUse(providerName, typeof(ErrorInjectionStorageProvider).FullName);
+            Assert.Equal(expectedVal, providerState.LastStoredGrainState.Field1); // Store-Field1
+
+            // The value should not have changed.
+            Assert.Equal(expectedVal, val);
+        }
+
+        /// <summary>
+        /// Tests that deactivations caused by an <see cref="InconsistentStateException"/> only affect the grain which
+        /// the exception originated from.
+        /// </summary>
+        /// <returns></returns>
+        [Fact, TestCategory("Functional"), TestCategory("Persistence")]
+        public async Task Persistence_Provider_InconsistentStateException_DeactivatesOnlyCurrentGrain()
+        {
+            var target = this.HostedCluster.GrainFactory.GetGrain<IPersistenceProviderErrorGrain>(Guid.NewGuid());
+            var proxy = this.HostedCluster.GrainFactory.GetGrain<IPersistenceProviderErrorProxyGrain>(Guid.NewGuid());
+            
+            // Record the original activation ids.
+            var targetActivationId = await target.GetActivationId();
+            var proxyActivationId = await proxy.GetActivationId();
+
+            // Cause an inconsistent state exception.
+            this.SetErrorInjection(ErrorInjectorProviderName, new ErrorInjectionBehavior
+            {
+                ErrorInjectionPoint = ErrorInjectionPoint.BeforeWrite,
+                ExceptionType = typeof(InconsistentStateException)
+            });
+            this.CheckStorageProviderErrors(() => proxy.DoWrite(63, target), typeof(InconsistentStateException));
+
+            // The target should have been deactivated by the exception.
+            Assert.NotEqual(targetActivationId, await target.GetActivationId());
+
+            // The grain which called the target grain should not have been deactivated.
+            Assert.Equal(proxyActivationId, await proxy.GetActivationId());
+        }
+
+        [Fact, TestCategory("Functional"), TestCategory("Persistence")]
         public async Task Persistence_Provider_Error_AfterWrite()
         {
             Guid id = Guid.NewGuid();
@@ -920,8 +995,7 @@ namespace UnitTests.StorageTests
         public async Task Persistence_Grain_BadProvider()
         {
             IBadProviderTestGrain grain = this.HostedCluster.GrainFactory.GetGrain<IBadProviderTestGrain>(Guid.NewGuid());
-            var oex = await Assert.ThrowsAsync<OrleansException>(() => grain.DoSomething());
-            Assert.IsAssignableFrom<BadProviderConfigException>(oex.InnerException);
+            var oex = await Assert.ThrowsAsync<BadGrainStorageConfigException>(() => grain.DoSomething());
         }
 
         [Fact, TestCategory("Functional"), TestCategory("Persistence")]
@@ -1117,39 +1191,41 @@ namespace UnitTests.StorageTests
             int val = await grain.GetValue();
             Assert.Equal(1, val);
         }
-        
-        #region Utility functions
+
         // ---------- Utility functions ----------
         private void SetStoredValue(string providerName, string providerTypeFullName, string grainType, IGrain grain, string fieldName, int newValue)
         {
             IManagementGrain mgmtGrain = this.HostedCluster.GrainFactory.GetGrain<IManagementGrain>(0);
             // set up SetVal func args
-            var args = new MockStorageProvider.SetValueArgs();
-            args.Val = newValue;
-            args.Name = "Field1";
-            args.GrainType = grainType;
-            args.GrainReference = (GrainReference)grain;
-            args.StateType = typeof(PersistenceTestGrainState);
+            var args = new MockStorageProvider.SetValueArgs
+            {
+                Val = newValue,
+                Name = "Field1",
+                GrainType = grainType,
+                GrainReference = (GrainReference) grain,
+                StateType = typeof(PersistenceTestGrainState)
+            };
             mgmtGrain.SendControlCommandToProvider(providerTypeFullName,
                 providerName, (int)MockStorageProvider.Commands.SetValue, args).Wait();
         }
 
         private void SetErrorInjection(string providerName, ErrorInjectionPoint errorInjectionPoint)
         {
-            IManagementGrain mgmtGrain = this.HostedCluster.GrainFactory.GetGrain<IManagementGrain>(0);
-            mgmtGrain.SendControlCommandToProvider(typeof(ErrorInjectionStorageProvider).FullName,
-                providerName, (int)MockStorageProvider.Commands.SetErrorInjection, errorInjectionPoint).Wait();
+            SetErrorInjection(providerName, new ErrorInjectionBehavior { ErrorInjectionPoint = errorInjectionPoint });
         }
 
-        private void CheckStorageProviderErrors(
-            Func<Task> taskFunc)
+        private void SetErrorInjection(string providerName, ErrorInjectionBehavior errorInjectionBehavior)
+        {
+            ErrorInjectionStorageProvider.SetErrorInjection(providerName, errorInjectionBehavior, this.HostedCluster.GrainFactory);
+        }
+
+        private void CheckStorageProviderErrors(Func<Task> taskFunc, Type expectedException = null)
         {
             StackTrace at = new StackTrace();
             TimeSpan timeout = Debugger.IsAttached ? TimeSpan.FromMinutes(5) : TimeSpan.FromSeconds(15);
             try
             {
-                bool ok = taskFunc().Wait(timeout);
-                if (!ok) throw new TimeoutException();
+                taskFunc().WithTimeout(timeout).GetAwaiter().GetResult();
 
                 if (ErrorInjectionStorageProvider.DoInjectErrors)
                 {
@@ -1161,12 +1237,13 @@ namespace UnitTests.StorageTests
             catch (Exception e)
             {
                 output.WriteLine("Exception caught: {0}", e);
-                var exc = e.GetBaseException();
-                if (exc is OrleansException)
+                var baseException = e.GetBaseException();
+                if (baseException is OrleansException && baseException.InnerException != null)
                 {
-                    exc = exc.InnerException;
+                    baseException = baseException.InnerException;
                 }
-                Assert.IsAssignableFrom<StorageProviderInjectedError>(exc);
+
+                Assert.IsAssignableFrom(expectedException ?? typeof(StorageProviderInjectedError), baseException);
                 //if (exc is StorageProviderInjectedError)
                 //{
                 //     //Expected error
@@ -1233,7 +1310,6 @@ namespace UnitTests.StorageTests
                 }
             }
         }
-        #endregion
     }
 }
 

@@ -2,8 +2,6 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using Orleans;
-using Orleans.TestingHost;
-using Tester;
 using TestExtensions;
 using UnitTests.GrainInterfaces;
 using Xunit;
@@ -16,10 +14,6 @@ namespace UnitTests.CancellationTests
 
         public class Fixture : BaseTestClusterFixture
         {
-            protected override TestCluster CreateTestCluster()
-            {
-                return new TestCluster(new TestClusterOptions(2));
-            }
         }
 
         public GrainCancellationTokenTests(Fixture fixture)
@@ -28,8 +22,8 @@ namespace UnitTests.CancellationTests
         }
 
         [Theory, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Cancellation")]
-        // [InlineData(0)] disabled until resolve of the https://github.com/dotnet/orleans/issues/1891
-        // [InlineData(10)]
+        [InlineData(0)]
+        [InlineData(10)]
         [InlineData(300)]
         public async Task GrainTaskCancellation(int delay)
         {
@@ -42,8 +36,8 @@ namespace UnitTests.CancellationTests
         }
 
         [Theory, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Cancellation")]
-        // [InlineData(0)]
-        // [InlineData(10)]
+        [InlineData(0)]
+        [InlineData(10)]
         [InlineData(300)]
         public async Task MultipleGrainsTaskCancellation(int delay)
         {
@@ -91,7 +85,7 @@ namespace UnitTests.CancellationTests
             await Task.Delay(TimeSpan.FromMilliseconds(100));
             await tcs.Cancel();
             var result = await grainTask;
-            Assert.Equal(true, result);
+            Assert.True(result);
         }
 
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Cancellation")]
@@ -103,7 +97,7 @@ namespace UnitTests.CancellationTests
             var grainTask = grains.Item1.CallOtherCancellationTokenCallbackResolve(grains.Item2);
             await tcs.Cancel();
             var result = await grainTask;
-            Assert.Equal(true, result);
+            Assert.True(result);
         }
 
         [Fact, TestCategory("Cancellation")]
@@ -127,8 +121,8 @@ namespace UnitTests.CancellationTests
         }
 
         [Theory, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Cancellation")]
-        // [InlineData(0)]
-        // [InlineData(10)]
+        [InlineData(0)]
+        [InlineData(10)]
         [InlineData(300)]
         public async Task InSiloGrainCancellation(int delay)
         {
@@ -136,17 +130,17 @@ namespace UnitTests.CancellationTests
         }
 
         [Theory, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Cancellation")]
-        // [InlineData(0)]
-        // [InlineData(10)]
+        [InlineData(0)]
+        [InlineData(10)]
         [InlineData(300)]
         public async Task InterSiloGrainCancellation(int delay)
         {
             await GrainGrainCancellation(true, delay);
         }
 
-        [Theory, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Cancellation")]
-        // [InlineData(0)]
-        // [InlineData(10)]
+        [SkippableTheory(Skip="https://github.com/dotnet/orleans/issues/5654"), TestCategory("BVT"), TestCategory("Functional"), TestCategory("Cancellation")]
+        [InlineData(0)]
+        [InlineData(10)]
         [InlineData(300)]
         public async Task InterSiloClientCancellationTokenPassing(int delay)
         {
@@ -154,8 +148,8 @@ namespace UnitTests.CancellationTests
         }
 
         [Theory, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Cancellation")]
-        // [InlineData(0)]
-        // [InlineData(10)]
+        [InlineData(0)]
+        [InlineData(10)]
         [InlineData(300)]
         public async Task InSiloClientCancellationTokenPassing(int delay)
         {

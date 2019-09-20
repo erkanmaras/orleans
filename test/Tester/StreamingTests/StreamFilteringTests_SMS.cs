@@ -1,7 +1,10 @@
-﻿using System;
+using System;
 using Orleans.Runtime.Configuration;
 using Orleans.TestingHost;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
+using Orleans;
+using Orleans.Hosting;
 using Xunit;
 using TestExtensions;
 using UnitTests.StreamingTests;
@@ -13,16 +16,27 @@ namespace Tester.StreamingTests
         public class Fixture : BaseTestClusterFixture
         {
             public const string StreamProvider = StreamTestsConstants.SMS_STREAM_PROVIDER_NAME;
-            protected override TestCluster CreateTestCluster()
+            protected override void ConfigureTestCluster(TestClusterBuilder builder)
             {
-                var options = new TestClusterOptions(2);
+                builder.AddClientBuilderConfigurator<ClientConfiguretor>();
+                builder.AddSiloBuilderConfigurator<SiloConfigurator>();
+            }
 
-                options.ClusterConfiguration.AddMemoryStorageProvider("MemoryStore");
-                options.ClusterConfiguration.AddMemoryStorageProvider("PubSubStore");
-
-                options.ClusterConfiguration.AddSimpleMessageStreamProvider(StreamProvider, false);
-                options.ClientConfiguration.AddSimpleMessageStreamProvider(StreamProvider, false);
-                return new TestCluster(options);
+            public class SiloConfigurator : ISiloBuilderConfigurator
+            {
+                public void Configure(ISiloHostBuilder hostBuilder)
+                {
+                    hostBuilder.AddSimpleMessageStreamProvider(StreamProvider)
+                        .AddMemoryGrainStorage("MemoryStore")
+                        .AddMemoryGrainStorage("PubSubStore");
+                }
+            }
+            public class ClientConfiguretor : IClientBuilderConfigurator
+            {
+                public void Configure(IConfiguration configuration, IClientBuilder clientBuilder)
+                {
+                    clientBuilder.AddSimpleMessageStreamProvider(StreamProvider);
+                }
             }
         }
 
@@ -46,7 +60,7 @@ namespace Tester.StreamingTests
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Streaming"), TestCategory("Filters")]
         public async Task SMS_Filter_BadFunc()
         {
-            await Assert.ThrowsAsync(typeof(ArgumentException), () =>
+            await Assert.ThrowsAsync<ArgumentException>(() =>
                  Test_Filter_BadFunc());
         }
 

@@ -1,17 +1,9 @@
 <p align="center">
   <img src="https://github.com/dotnet/orleans/blob/gh-pages/assets/logo_full.png" alt="Orleans logo" width="600px"> 
 </p>
-=======
 
-
-
-
-[![Build status](http://ci.dot.net/job/dotnet_orleans/job/master/job/netfx/badge/icon)](http://ci.dot.net/job/dotnet_orleans/job/master/)
 [![NuGet](https://img.shields.io/nuget/v/Microsoft.Orleans.Core.svg?style=flat)](http://www.nuget.org/profiles/Orleans)
-
 [![Gitter](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/dotnet/orleans?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge)
-
-[![Help Wanted Issues](https://badge.waffle.io/dotnet/orleans.svg?label=up-for-grabs&title=Help Wanted Issues)](http://waffle.io/dotnet/orleans)
 
 Orleans is a framework that provides a straight-forward approach to building distributed high-scale computing applications, without the need to learn and apply complex concurrency or other scaling patterns. 
 
@@ -29,11 +21,13 @@ There are several packages, one for each different project type (interfaces, gra
 
 In the grain interfaces project:
 ```
-PM> Install-Package Microsoft.Orleans.OrleansCodeGenerator.Build
+PM> Install-Package Microsoft.Orleans.Core.Abstractions
+PM> Install-Package Microsoft.Orleans.CodeGenerator.MSBuild
 ```
 In the grain implementations project:
 ```
-PM> Install-Package Microsoft.Orleans.OrleansCodeGenerator.Build
+PM> Install-Package Microsoft.Orleans.Core.Abstractions
+PM> Install-Package Microsoft.Orleans.CodeGenerator.MSBuild
 ```
 In the server (silo) project:
 ```
@@ -48,19 +42,57 @@ PM> Install-Package Microsoft.Orleans.Client
 
 The stable production-quality release is located [here](https://github.com/dotnet/orleans/releases/latest).
 
-The latest clean development branch build from CI is located: [here](https://ci.dot.net/job/dotnet_orleans/job/master/job/netfx-bvt/lastStableBuild/artifact/)
+The latest clean development branch build from CI is located: [here](https://ci.dot.net/job/dotnet_orleans/job/master/job/bvt/lastStableBuild/artifact/)
 
-### Building From Source
+Nightly builds are published to https://dotnet.myget.org/gallery/orleans-ci . These builds pass all functional tests, but are not thoroughly tested as the stable builds or pre-release builds we push to NuGet.org
+
+To use nightly builds in your project, add the MyGet feed using either of the following methods:
+
+1. Changing the .csproj file to include this section:
+
+```xml
+    <RestoreSources>
+      $(RestoreSources);
+      https://dotnet.myget.org/F/orleans-ci/api/v3/index.json;
+    </RestoreSources>
+```
+or
+
+2. Creating a `NuGet.config` file in the solution directory with the following contents:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+ <packageSources>
+    <clear />
+    <add key="orleans-ci" value="https://dotnet.myget.org/F/orleans-ci/api/v3/index.json" />
+    <add key="nuget" value="https://api.nuget.org/v3/index.json" />
+ </packageSources>
+</configuration>
+```
+
+### Building from source
 
 Clone the sources from the GitHub [repo](https://github.com/dotnet/orleans) 
 
-Run run the `Build.cmd` script to build the binaries locally,
-then reference the required NuGet packages from `Binaries\NuGet.Packages\*`.
+Run the `Build.cmd` script to build the nuget packages locally,
+then reference the required NuGet packages from `/Artifacts/Release/*`.
+You can run `Test.cmd` to run all BVT tests, and `TestAll.cmd` to also run Functional tests (which take much longer)
+
+### Building and running tests in Visual Studio 2017
+.NET Core 2.0 SDK is a pre-requisite to build Orleans.sln.
+
+There might be errors trying to build from Visual Studio because of conflicts with the test discovery engine (error says could not copy `xunit.abstractions.dll`).
+The reason for that error is that you need to configure the test runner in VS like so (after opening the solution):
+* `Test` -> `Test Settings` -> Uncheck `Keep Test Execution Engine running`
+* `Test` -> `Test Settings` -> `Default Processor Architecture` -> Check `X64`
+
+Then either restart VS, or go to the task manager and kill the processes that starts with `vstest.`. Then build once again and it should succeed and tests should appear in the `Test Explorer` window.
 
 Documentation
 =============
 
-Documentation is located [here](http://dotnet.github.io/orleans/)
+Documentation is located [here](https://dotnet.github.io/orleans/Documentation/)
 
 Code Examples
 =============
@@ -77,7 +109,7 @@ Provide an implementation of that interface:
 ```c#
 public class HelloGrain : Orleans.Grain, IHello
 {
-  Task<string> SayHello(string greeting)
+  public Task<string> SayHello(string greeting)
   {
     return Task.FromResult($"You said: '{greeting}', I say: Hello!");
   }
@@ -95,7 +127,7 @@ Console.WriteLine(await friend.SayHello("Good morning, my friend!"));
 
 Blog
 =========
-[Orleans Blog](https://blogs.msdn.microsoft.com/orleans/) is a place to share our thoughts, plans, learnings, tips and tricks, and ideas, crazy and otherwise, which don’t easily fit the documentation format. We would also like to see here posts from the community members, sharing their experiences, ideas, and wisdom. 
+[Orleans Blog](https://dotnet.github.io/orleans/blog/) is a place to share our thoughts, plans, learnings, tips and tricks, and ideas, crazy and otherwise, which don’t easily fit the documentation format. We would also like to see here posts from the community members, sharing their experiences, ideas, and wisdom. 
 So, welcome to Orleans Blog, both as a reader and as a blogger!
 
 Community

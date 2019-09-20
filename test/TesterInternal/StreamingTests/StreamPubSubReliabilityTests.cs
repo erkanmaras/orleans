@@ -1,17 +1,19 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
+using System;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Orleans;
+using Orleans.Configuration;
+using Orleans.Hosting;
+using Orleans.Providers;
 using Orleans.Runtime;
 using Orleans.Runtime.Configuration;
+using Orleans.Storage;
 using Orleans.TestingHost;
 using TestExtensions;
 using UnitTests.GrainInterfaces;
 using UnitTests.StorageTests;
 using Xunit;
-using Tester;
 
 namespace UnitTests.StreamingTests
 {
@@ -19,25 +21,33 @@ namespace UnitTests.StreamingTests
     {
         public class Fixture : BaseTestClusterFixture
         {
-            protected override TestCluster CreateTestCluster()
+            protected override void ConfigureTestCluster(TestClusterBuilder builder)
             {
-                var options = new TestClusterOptions(initialSilosCount: 4);
+                builder.Options.InitialSilosCount = 4;
+                builder.AddSiloBuilderConfigurator<SiloConfigurator>();
+                builder.AddClientBuilderConfigurator<ClientConfiguretor>();
+            }
+        }
 
-                options.ClusterConfiguration.AddMemoryStorageProvider("MemoryStore", numStorageGrains: 1);
-                options.ClusterConfiguration.Globals.RegisterStorageProvider<UnitTests.StorageTests.ErrorInjectionStorageProvider>(PubSubStoreProviderName);
-
-                options.ClusterConfiguration.AddSimpleMessageStreamProvider(StreamTestsConstants.SMS_STREAM_PROVIDER_NAME, fireAndForgetDelivery: false);
-
-                options.ClusterConfiguration.Globals.MaxResendCount = 0;
-                options.ClusterConfiguration.Globals.ResponseTimeout = TimeSpan.FromSeconds(30);
-
-                options.ClientConfiguration.AddSimpleMessageStreamProvider(StreamTestsConstants.SMS_STREAM_PROVIDER_NAME, fireAndForgetDelivery: false);
-
-                options.ClientConfiguration.ClientSenderBuckets = 8192;
-                options.ClientConfiguration.ResponseTimeout = TimeSpan.FromSeconds(30);
-                options.ClientConfiguration.MaxResendCount = 0;
-
-                return new TestCluster(options);
+        public class SiloConfigurator : ISiloBuilderConfigurator
+        {
+            public void Configure(ISiloHostBuilder hostBuilder)
+            {
+                hostBuilder.AddSimpleMessageStreamProvider(StreamTestsConstants.SMS_STREAM_PROVIDER_NAME)
+                    .AddMemoryGrainStorage("MemoryStore", op => op.NumStorageGrains = 1)
+                    .ConfigureServices(services =>
+                    {
+                        services.AddSingleton<ErrorInjectionStorageProvider>();
+                        services.AddSingletonNamedService<IGrainStorage, ErrorInjectionStorageProvider>(PubSubStoreProviderName);
+                        services.AddSingletonNamedService<IControllable, ErrorInjectionStorageProvider>(PubSubStoreProviderName);
+                    });
+            }
+        }
+        public class ClientConfiguretor : IClientBuilderConfigurator
+        {
+            public void Configure(IConfiguration configuration, IClientBuilder clientBuilder)
+            {
+                clientBuilder.AddSimpleMessageStreamProvider(StreamTestsConstants.SMS_STREAM_PROVIDER_NAME);
             }
         }
 
@@ -78,7 +88,7 @@ namespace UnitTests.StreamingTests
             SetErrorInjection(PubSubStoreProviderName, ErrorInjectionPoint.BeforeRead);
 
             // TODO: expect StorageProviderInjectedError directly instead of OrleansException
-            await Assert.ThrowsAsync<OrleansException>(() =>
+            await Assert.ThrowsAsync<StorageProviderInjectedError>(() =>
                 Test_PubSub_Stream(StreamProviderName, StreamId));
         }
 
@@ -87,10 +97,8 @@ namespace UnitTests.StreamingTests
         {
             SetErrorInjection(PubSubStoreProviderName, ErrorInjectionPoint.BeforeWrite);
 
-            var exception = await Assert.ThrowsAsync<OrleansException>(() =>
+            var exception = await Assert.ThrowsAsync<StorageProviderInjectedError>(() =>
                 Test_PubSub_Stream(StreamProviderName, StreamId));
-
-            Assert.IsAssignableFrom<StorageProviderInjectedError>(exception.InnerException);
         }
 
         private async Task Test_PubSub_Stream(string streamProviderName, Guid streamId)
@@ -124,9 +132,10 @@ namespace UnitTests.StreamingTests
 
         private void SetErrorInjection(string providerName, ErrorInjectionPoint errorInjectionPoint)
         {
-            IManagementGrain mgmtGrain = this.HostedCluster.GrainFactory.GetGrain<IManagementGrain>(0);
-            mgmtGrain.SendControlCommandToProvider(typeof(ErrorInjectionStorageProvider).FullName,
-                providerName, (int)MockStorageProvider.Commands.SetErrorInjection, errorInjectionPoint).Wait();
+            ErrorInjectionStorageProvider.SetErrorInjection(
+                providerName,
+                new ErrorInjectionBehavior { ErrorInjectionPoint = errorInjectionPoint },
+                this.HostedCluster.GrainFactory);
         }
     }
 }

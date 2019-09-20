@@ -1,21 +1,25 @@
-﻿
+
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using Orleans.Providers.Streams.Common;
-using Orleans.Runtime;
 using Orleans.Serialization;
 using Orleans.Streams;
-using static System.String;
+using System.Linq;
+using Microsoft.Extensions.Logging;
 
 namespace Orleans.Providers.Streams.Generator
 {
     /// <summary>
     /// Pooled cache for generator stream provider
     /// </summary>
-    public class GeneratorPooledCache : IQueueCache
+    public class GeneratorPooledCache : IQueueCache, ICacheDataAdapter
     {
-        private readonly PooledQueueCache<GeneratedBatchContainer, CachedMessage> cache;
+        private readonly IObjectPool<FixedSizeBuffer> bufferPool;
+        private readonly SerializationManager serializationManager;
+        private readonly IEvictionStrategy evictionStrategy;
+        private readonly PooledQueueCache cache;
+
+        private FixedSizeBuffer currentBuffer;
 
         /// <summary>
         /// Pooled cache for generator stream provider
@@ -23,133 +27,89 @@ namespace Orleans.Providers.Streams.Generator
         /// <param name="bufferPool"></param>
         /// <param name="logger"></param>
         /// <param name="serializationManager"></param>
-        public GeneratorPooledCache(IObjectPool<FixedSizeBuffer> bufferPool, Logger logger, SerializationManager serializationManager)
+        /// <param name="cacheMonitor"></param>
+        /// <param name="monitorWriteInterval">monitor write interval.  Only triggered for active caches.</param>
+        public GeneratorPooledCache(IObjectPool<FixedSizeBuffer> bufferPool, ILogger logger, SerializationManager serializationManager, ICacheMonitor cacheMonitor, TimeSpan? monitorWriteInterval)
         {
-            var dataAdapter = new CacheDataAdapter(bufferPool, serializationManager);
-            cache = new PooledQueueCache<GeneratedBatchContainer, CachedMessage>(dataAdapter, CacheDataComparer.Instance, logger);
-            dataAdapter.PurgeAction = cache.Purge;
+            this.bufferPool = bufferPool;
+            this.serializationManager = serializationManager;
+            cache = new PooledQueueCache(this, logger, cacheMonitor, monitorWriteInterval);
+            TimePurgePredicate purgePredicate = new TimePurgePredicate(TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(10));
+            this.evictionStrategy = new ChronologicalEvictionStrategy(logger, purgePredicate, cacheMonitor, monitorWriteInterval) {PurgeObservable = cache};
         }
 
-        // For fast GC this struct should contain only value types.  I included streamNamespace because I'm lasy and this is test code, but it should not be in here.
-        private struct CachedMessage
+        public IBatchContainer GetBatchContainer(ref CachedMessage cachedMessage)
         {
-            public Guid StreamGuid;
-            public string StreamNamespace;
-            public long SequenceNumber;
-            public ArraySegment<byte> Payload;
+            //Deserialize payload
+            int readOffset = 0;
+            ArraySegment<byte> payload = SegmentBuilder.ReadNextBytes(cachedMessage.Segment, ref readOffset);
+            var stream = new BinaryTokenStreamReader(payload);
+            object payloadObject = this.serializationManager.Deserialize(stream);
+            return new GeneratedBatchContainer(cachedMessage.StreamGuid, cachedMessage.StreamNamespace,
+                payloadObject, new EventSequenceTokenV2(cachedMessage.SequenceNumber));
         }
 
-        private class CacheDataComparer : ICacheDataComparer<CachedMessage>
+        public StreamSequenceToken GetSequenceToken(ref CachedMessage cachedMessage)
         {
-            public static readonly ICacheDataComparer<CachedMessage> Instance = new CacheDataComparer(); 
-
-            public int Compare(CachedMessage cachedMessage, StreamSequenceToken token)
-            {
-                var realToken = (EventSequenceTokenV2)token;
-                return cachedMessage.SequenceNumber != realToken.SequenceNumber
-                    ? (int)(cachedMessage.SequenceNumber - realToken.SequenceNumber)
-                    : 0 - realToken.EventIndex;
-            }
-
-            public bool Equals(CachedMessage cachedMessage, IStreamIdentity streamIdentity)
-            {
-                var results = cachedMessage.StreamGuid.CompareTo(streamIdentity.Guid);
-                return results == 0 && string.Compare(cachedMessage.StreamNamespace, streamIdentity.Namespace, StringComparison.Ordinal)==0;
-            }
+            return new EventSequenceTokenV2(cachedMessage.SequenceNumber);
         }
 
-        private class CacheDataAdapter : ICacheDataAdapter<GeneratedBatchContainer, CachedMessage>
+        private CachedMessage QueueMessageToCachedMessage(GeneratedBatchContainer queueMessage, DateTime dequeueTimeUtc)
         {
-            private readonly IObjectPool<FixedSizeBuffer> bufferPool;
-            private readonly SerializationManager serializationManager;
-            private FixedSizeBuffer currentBuffer;
-
-            public Action<IDisposable> PurgeAction { private get; set; }
-
-            public CacheDataAdapter(IObjectPool<FixedSizeBuffer> bufferPool, SerializationManager serializationManager)
+            StreamPosition streamPosition = GetStreamPosition(queueMessage);
+            return new CachedMessage()
             {
-                if (bufferPool == null)
+                StreamGuid = streamPosition.StreamIdentity.Guid,
+                StreamNamespace = streamPosition.StreamIdentity.Namespace != null ? string.Intern(streamPosition.StreamIdentity.Namespace) : null,
+                SequenceNumber = queueMessage.RealToken.SequenceNumber,
+                EnqueueTimeUtc = queueMessage.EnqueueTimeUtc,
+                DequeueTimeUtc = dequeueTimeUtc,
+                Segment = SerializeMessageIntoPooledSegment(queueMessage)
+            };
+        }
+
+        // Placed object message payload into a segment from a buffer pool.  When this get's too big, older blocks will be purged
+        private ArraySegment<byte> SerializeMessageIntoPooledSegment(GeneratedBatchContainer queueMessage)
+        {
+            byte[] serializedPayload = this.serializationManager.SerializeToByteArray(queueMessage.Payload);
+            // get size of namespace, offset, partitionkey, properties, and payload
+            int size = SegmentBuilder.CalculateAppendSize(serializedPayload);
+
+            // get segment
+            ArraySegment<byte> segment;
+            if (currentBuffer == null || !currentBuffer.TryGetSegment(size, out segment))
+            {
+                // no block or block full, get new block and try again
+                currentBuffer = bufferPool.Allocate();
+                //call EvictionStrategy's OnBlockAllocated method
+                this.evictionStrategy.OnBlockAllocated(currentBuffer);
+                // if this fails with clean block, then requested size is too big
+                if (!currentBuffer.TryGetSegment(size, out segment))
                 {
-                    throw new ArgumentNullException(nameof(bufferPool));
+                    string errmsg = $"Message size is to big. MessageSize: {size}";
+                    throw new ArgumentOutOfRangeException(nameof(queueMessage), errmsg);
                 }
-                this.bufferPool = bufferPool;
-                this.serializationManager = serializationManager;
             }
 
-            public StreamPosition QueueMessageToCachedMessage(ref CachedMessage cachedMessage, GeneratedBatchContainer queueMessage, DateTime dequeueTimeUtc)
-            {
-                StreamPosition setreamPosition = GetStreamPosition(queueMessage);
-                cachedMessage.StreamGuid = setreamPosition.StreamIdentity.Guid;
-                cachedMessage.StreamNamespace = setreamPosition.StreamIdentity.Namespace;
-                cachedMessage.SequenceNumber = queueMessage.RealToken.SequenceNumber;
-                cachedMessage.Payload = SerializeMessageIntoPooledSegment(queueMessage);
-                return setreamPosition;
-            }
+            // encode namespace, offset, partitionkey, properties and payload into segment
+            int writeOffset = 0;
+            SegmentBuilder.Append(segment, ref writeOffset, serializedPayload);
 
-            // Placed object message payload into a segment from a buffer pool.  When this get's too big, older blocks will be purged
-            private ArraySegment<byte> SerializeMessageIntoPooledSegment(GeneratedBatchContainer queueMessage)
-            {
-                // serialize payload
-                byte[] serializedPayload = this.serializationManager.SerializeToByteArray(queueMessage.Payload);
-                int size = serializedPayload.Length;
+            return segment;
+        }
 
-                // get segment from current block
-                ArraySegment<byte> segment;
-                if (currentBuffer == null || !currentBuffer.TryGetSegment(size, out segment))
-                {
-                    // no block or block full, get new block and try again
-                    currentBuffer = bufferPool.Allocate();
-                    currentBuffer.SetPurgeAction(PurgeAction);
-                    // if this fails with clean block, then requested size is too big
-                    if (!currentBuffer.TryGetSegment(size, out segment))
-                    {
-                        string errmsg = Format(CultureInfo.InvariantCulture,
-                            "Message size is to big. MessageSize: {0}", size);
-                        throw new ArgumentOutOfRangeException(nameof(queueMessage), errmsg);
-                    }
-                }
-                Buffer.BlockCopy(serializedPayload, 0, segment.Array, segment.Offset, size);
-                return segment;
-            }
-
-            public IBatchContainer GetBatchContainer(ref CachedMessage cachedMessage)
-            {
-                //Deserialize payload
-                var stream = new BinaryTokenStreamReader(cachedMessage.Payload);
-                object payloadObject = this.serializationManager.Deserialize(stream);
-                return new GeneratedBatchContainer(cachedMessage.StreamGuid, cachedMessage.StreamNamespace,
-                    payloadObject, new EventSequenceTokenV2(cachedMessage.SequenceNumber));
-            }
-
-            public StreamSequenceToken GetSequenceToken(ref CachedMessage cachedMessage)
-            {
-                return new EventSequenceTokenV2(cachedMessage.SequenceNumber);
-            }
-
-            public StreamPosition GetStreamPosition(GeneratedBatchContainer queueMessage)
-            {
-                return new StreamPosition(new StreamIdentity(queueMessage.StreamGuid, queueMessage.StreamNamespace), queueMessage.RealToken);
-            }
-
-            public bool ShouldPurge(ref CachedMessage cachedMessage, ref CachedMessage newestCachedMessage, IDisposable purgeRequest, DateTime nowUtc)
-            {
-                var purgedResource = (FixedSizeBuffer) purgeRequest;
-                // if we're purging our current buffer, don't use it any more
-                if (currentBuffer != null && currentBuffer.Id == purgedResource.Id)
-                {
-                    currentBuffer = null;
-                }
-                return cachedMessage.Payload.Array == purgedResource.Id;
-            }
+        private StreamPosition GetStreamPosition(GeneratedBatchContainer queueMessage)
+        {
+            return new StreamPosition(new StreamIdentity(queueMessage.StreamGuid, queueMessage.StreamNamespace), queueMessage.RealToken);
         }
 
         private class Cursor : IQueueCacheCursor
         {
-            private readonly PooledQueueCache<GeneratedBatchContainer, CachedMessage> cache;
+            private readonly PooledQueueCache cache;
             private readonly object cursor;
             private IBatchContainer current;
 
-            public Cursor(PooledQueueCache<GeneratedBatchContainer, CachedMessage> cache, IStreamIdentity streamIdentity, StreamSequenceToken token)
+            public Cursor(PooledQueueCache cache, IStreamIdentity streamIdentity, StreamSequenceToken token)
             {
                 this.cache = cache;
                 cursor = cache.GetCursor(streamIdentity, token);
@@ -197,11 +157,12 @@ namespace Orleans.Providers.Streams.Generator
         /// <param name="messages"></param>
         public void AddToCache(IList<IBatchContainer> messages)
         {
-            DateTime dequeueTimeUtc = DateTime.UtcNow;
-            foreach (IBatchContainer container in messages)
-            {
-                cache.Add(container as GeneratedBatchContainer, dequeueTimeUtc);
-            }
+            DateTime utcNow = DateTime.UtcNow;
+            List<CachedMessage> generatedMessages = messages
+                .Cast<GeneratedBatchContainer>()
+                .Select(batch => QueueMessageToCachedMessage(batch, utcNow))
+                .ToList();
+            cache.Add(generatedMessages, utcNow);
         }
 
         /// <summary>
@@ -212,11 +173,12 @@ namespace Orleans.Providers.Streams.Generator
         public bool TryPurgeFromCache(out IList<IBatchContainer> purgedItems)
         {
             purgedItems = null;
+            this.evictionStrategy.PerformPurge(DateTime.UtcNow);
             return false;
         }
 
         /// <summary>
-        /// Acquire a stream message cursor.  This can be used to retreave messages from the
+        /// Acquire a stream message cursor.  This can be used to retrieve messages from the
         ///   cache starting at the location indicated by the provided token.
         /// </summary>
         /// <param name="streamIdentity"></param>

@@ -1,29 +1,99 @@
-﻿using System;
+using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using Orleans;
+using Orleans.Configuration;
+using Orleans.Messaging;
+using Orleans.Runtime;
 using Orleans.Runtime.Configuration;
+using TestGrainInterfaces;
+using UnitTests.DtosRefOrleans;
 using Xunit;
 
 namespace NonSilo.Tests
 {
+    public class NoOpGatewaylistProvider : IGatewayListProvider
+    {
+        public TimeSpan MaxStaleness => throw new NotImplementedException();
+
+        public bool IsUpdatable => throw new NotImplementedException();
+
+        public Task<IList<Uri>> GetGateways()
+        {
+            throw new NotImplementedException();
+        }
+
+        public Task InitializeGatewayListProvider()
+        {
+            throw new NotImplementedException();
+        }
+    }
+
     /// <summary>
     /// Tests for <see cref="ClientBuilder"/>.
     /// </summary>
     [TestCategory("BVT")]
+    [TestCategory("ClientBuilder")]
     public class ClientBuilderTests
     {
+        /// <summary>
+        /// Tests that a client cannot be created without specifying a ClusterId and a ServiceId.
+        /// </summary>
+        [Fact]
+        public void ClientBuilder_ClusterOptionsTest()
+        {
+            Assert.Throws<OrleansConfigurationException>(() => new ClientBuilder()
+                .ConfigureServices(services => services.AddSingleton<IGatewayListProvider, NoOpGatewaylistProvider>())
+                .Build());
+
+            Assert.Throws<OrleansConfigurationException>(() => new ClientBuilder()
+               .Configure<ClusterOptions>(options => options.ClusterId = "someClusterId")
+               .ConfigureServices(services => services.AddSingleton<IGatewayListProvider, NoOpGatewaylistProvider>())
+               .Build());
+
+            Assert.Throws<OrleansConfigurationException>(() => new ClientBuilder()
+               .Configure<ClusterOptions>(options => options.ServiceId = "someServiceId")
+               .ConfigureServices(services => services.AddSingleton<IGatewayListProvider, NoOpGatewaylistProvider>())
+               .Build());
+
+            var builder = new ClientBuilder()
+                .Configure<ClusterOptions>(options => { options.ClusterId = "someClusterId"; options.ServiceId = "someServiceId"; })
+                .ConfigureServices(services => services.AddSingleton<IGatewayListProvider, NoOpGatewaylistProvider>());
+            using (var client = builder.Build())
+            {
+                Assert.NotNull(client);
+            }
+        }
+
         /// <summary>
         /// Tests that a client can be created without specifying configuration.
         /// </summary>
         [Fact]
         public void ClientBuilder_NoSpecifiedConfigurationTest()
         {
-            using (var client = new ClientBuilder().Build())
+            var builder = new ClientBuilder()
+                .ConfigureDefaults()
+                .ConfigureServices(RemoveConfigValidators)
+                .ConfigureServices(services => services.AddSingleton<IGatewayListProvider, NoOpGatewaylistProvider>());
+            using (var client = builder.Build())
             {
                 Assert.NotNull(client);
             }
+        }
+
+        [Fact]
+        public void ClientBuilder_ThrowsDuringStartupIfNoGrainInterfacesAdded()
+        {
+            // Add only an assembly with generated serializers but no grain interfaces
+            var clientBuilder = new ClientBuilder()
+                .UseLocalhostClustering()
+                .ConfigureApplicationParts(parts => parts.AddApplicationPart(typeof(ClassReferencingOrleansTypeDto).Assembly))
+                .ConfigureServices(services => services.AddSingleton<IGatewayListProvider, NoOpGatewaylistProvider>());
+
+            Assert.Throws<OrleansConfigurationException>(() => clientBuilder.Build());
         }
 
         /// <summary>
@@ -32,7 +102,10 @@ namespace NonSilo.Tests
         [Fact]
         public void ClientBuilder_DoubleBuildTest()
         {
-            var builder = new ClientBuilder();
+            var builder = new ClientBuilder()
+                .ConfigureDefaults()
+                .ConfigureServices(RemoveConfigValidators)
+                .ConfigureServices(services => services.AddSingleton<IGatewayListProvider, NoOpGatewaylistProvider>());
             using (builder.Build())
             {
                 Assert.Throws<InvalidOperationException>(() => builder.Build());
@@ -40,32 +113,15 @@ namespace NonSilo.Tests
         }
 
         /// <summary>
-        /// Tests that configuration cannot be specified twice.
-        /// </summary>
-        [Fact]
-        public void ClientBuilder_DoubleSpecifyConfigurationTest()
-        {
-            var builder = new ClientBuilder().UseConfiguration(new ClientConfiguration());
-            Assert.Throws<InvalidOperationException>(() => builder.UseConfiguration(new ClientConfiguration()));
-        }
-
-        /// <summary>
-        /// Tests that a client can be created without specifying configuration.
-        /// </summary>
-        [Fact]
-        public void ClientBuilder_NullConfigurationTest()
-        {
-            var builder = new ClientBuilder();
-            Assert.Throws<ArgumentNullException>(() => builder.UseConfiguration(null));
-        }
-        
-        /// <summary>
         /// Tests that the <see cref="IClientBuilder.ConfigureServices"/> delegate works as expected.
         /// </summary>
         [Fact]
         public void ClientBuilder_ServiceProviderTest()
         {
-            var builder = new ClientBuilder();
+            var builder = new ClientBuilder()
+                .ConfigureDefaults()
+                .ConfigureServices(RemoveConfigValidators)
+                .ConfigureServices(services => services.AddSingleton<IGatewayListProvider, NoOpGatewaylistProvider>());
 
             Assert.Throws<ArgumentNullException>(() => builder.ConfigureServices(null));
 
@@ -103,6 +159,12 @@ namespace NonSilo.Tests
                 // The last registered service should be provided by default.
                 Assert.Equal(2, client.ServiceProvider.GetRequiredService<MyService>().Id);
             }
+        }
+
+        private static void RemoveConfigValidators(IServiceCollection services)
+        {
+            var validators = services.Where(descriptor => descriptor.ServiceType == typeof(IConfigurationValidator)).ToList();
+            foreach (var validator in validators) services.Remove(validator);
         }
 
         private class MyService

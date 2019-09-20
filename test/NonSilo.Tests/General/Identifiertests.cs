@@ -29,10 +29,66 @@ namespace UnitTests.General
             this.environment = fixture;
         }
 
+        [Fact, TestCategory("BVT"), TestCategory("Identifiers")]
+        public void UniqueKeyToByteArrayWithKeyExt()
+        {
+            var key = UniqueKey.NewKey(Guid.NewGuid(), category: UniqueKey.Category.KeyExtGrain, keyExt: "hello world");
+
+            var result = key.ToByteArray();
+
+            var sw = new BinaryTokenStreamWriter();
+            sw.Write(key);
+            var expected = sw.ToByteArray();
+
+            Assert.Equal(expected.Length, result.Length);
+            for (int i = 0; i < expected.Length; i++)
+            {
+                Assert.Equal(expected[i], result[i]);
+            }
+        }
+
+        [Fact, TestCategory("BVT"), TestCategory("Identifiers")]
+        public void UniqueKeyToByteArrayWithoutKeyExt()
+        {
+            var key = UniqueKey.NewKey(Guid.NewGuid(), category: UniqueKey.Category.GeoClient);
+
+            var result = key.ToByteArray();
+
+            var sw = new BinaryTokenStreamWriter();
+            sw.Write(key);
+            var expected = sw.ToByteArray();
+
+            Assert.Equal(expected.Length, result.Length);
+            for (int i = 0; i < expected.Length; i++)
+            {
+                Assert.Equal(expected[i], result[i]);
+            }
+        }
+
+        [Fact, TestCategory("BVT"), TestCategory("Identifiers")]
+        public void SiloAddressGetUniformHashCodes()
+        {
+            int numberofHash = 3;
+            var siloAddress = SiloAddress.New(new IPEndPoint(IPAddress.Loopback, 8080), 26);
+
+            var result = siloAddress.GetUniformHashCodes(numberofHash);
+
+            for (int i = 0; i < numberofHash; i++)
+            {
+                var sw = new BinaryTokenStreamWriter();
+                sw.Write(siloAddress);
+                sw.Write(i);
+                var tmp = sw.ToByteArray();
+                var expected = JenkinsHash.ComputeHash(sw.ToByteArray());
+
+                Assert.Equal(expected, result[i]);
+            }
+        }
+
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Identifiers")]
         public void ID_IsSystem()
         {
-            GrainId testGrain = Constants.DirectoryServiceId;
+            GrainId testGrain = Orleans.Runtime.Constants.DirectoryServiceId;
             output.WriteLine("Testing GrainID " + testGrain);
             Assert.True(testGrain.IsSystemTarget); // System grain ID is not flagged as a system ID
 
@@ -106,26 +162,26 @@ namespace UnitTests.General
         {
             UniqueKey expected1 = UniqueKey.NewKey(Guid.NewGuid());
             string str1 = expected1.ToHexString();
-            UniqueKey actual1 = UniqueKey.Parse(str1);
+            UniqueKey actual1 = UniqueKey.Parse(str1.AsSpan());
             Assert.Equal(expected1, actual1); // UniqueKey.ToString() and UniqueKey.Parse() failed to reproduce an identical object (case 1).
 
             string kx3 = "case 3";
             UniqueKey expected3 = UniqueKey.NewKey(Guid.NewGuid(), category: UniqueKey.Category.KeyExtGrain, keyExt: kx3);
             string str3 = expected3.ToHexString();
-            UniqueKey actual3 = UniqueKey.Parse(str3);
+            UniqueKey actual3 = UniqueKey.Parse(str3.AsSpan());
             Assert.Equal(expected3, actual3); // UniqueKey.ToString() and UniqueKey.Parse() failed to reproduce an identical object (case 3).
 
             long pk = random.Next();
             UniqueKey expected4 = UniqueKey.NewKey(pk);
             string str4 = expected4.ToHexString();
-            UniqueKey actual4 = UniqueKey.Parse(str4);
+            UniqueKey actual4 = UniqueKey.Parse(str4.AsSpan());
             Assert.Equal(expected4, actual4); // UniqueKey.ToString() and UniqueKey.Parse() failed to reproduce an identical object (case 4).
 
             pk = random.Next();
             string kx5 = "case 5";
             UniqueKey expected5 = UniqueKey.NewKey(pk, category: UniqueKey.Category.KeyExtGrain, keyExt: kx5);
             string str5 = expected5.ToHexString();
-            UniqueKey actual5 = UniqueKey.Parse(str5);
+            UniqueKey actual5 = UniqueKey.Parse(str5.AsSpan());
             Assert.Equal(expected5, actual5); // UniqueKey.ToString() and UniqueKey.Parse() failed to reproduce an identical object (case 5).
         }
 
@@ -388,7 +444,7 @@ namespace UnitTests.General
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Identifiers")]
         public void SiloAddress_ToFrom_ParsableString()
         {
-            SiloAddress address1 = SiloAddress.NewLocalAddress(12345);
+            SiloAddress address1 = SiloAddressUtils.NewLocalSiloAddress(12345);
 
             string addressStr1 = address1.ToParsableString();
             SiloAddress addressObj1 = SiloAddress.FromParsableString(addressStr1);
@@ -430,17 +486,17 @@ namespace UnitTests.General
             TestGrainReference(grainRef);
 
             GrainId systemTragetGrainId = GrainId.NewSystemTargetGrainIdByTypeCode(2);
-            grainRef = GrainReference.FromGrainId(systemTragetGrainId, null, null, SiloAddress.NewLocalAddress(1));
+            grainRef = GrainReference.FromGrainId(systemTragetGrainId, null, null, SiloAddressUtils.NewLocalSiloAddress(1));
             this.environment.GrainFactory.BindGrainReference(grainRef);
             TestGrainReference(grainRef);
 
             GrainId observerGrainId = GrainId.NewClientId();
-            grainRef = GrainReference.NewObserverGrainReference(observerGrainId, GuidId.GetNewGuidId(), this.environment.RuntimeClient);
+            grainRef = GrainReference.NewObserverGrainReference(observerGrainId, GuidId.GetNewGuidId(), this.environment.RuntimeClient.GrainReferenceRuntime);
             this.environment.GrainFactory.BindGrainReference(grainRef);
             TestGrainReference(grainRef);
 
             GrainId geoObserverGrainId = GrainId.NewClientId("clusterid");
-            grainRef = GrainReference.NewObserverGrainReference(geoObserverGrainId, GuidId.GetNewGuidId(), this.environment.RuntimeClient);
+            grainRef = GrainReference.NewObserverGrainReference(geoObserverGrainId, GuidId.GetNewGuidId(), this.environment.RuntimeClient.GrainReferenceRuntime);
             this.environment.GrainFactory.BindGrainReference(grainRef);
             TestGrainReference(grainRef);
         }

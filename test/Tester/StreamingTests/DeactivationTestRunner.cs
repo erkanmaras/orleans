@@ -1,9 +1,7 @@
 using System;
 using System.Threading.Tasks;
 using Orleans;
-using Orleans.Runtime;
 using Orleans.Streams;
-using Orleans.TestingHost.Utils;
 using UnitTests.GrainInterfaces;
 using Xunit;
 
@@ -22,7 +20,7 @@ namespace UnitTests.StreamingTests
             public Task Increment()
             {
                 Value++;
-                return TaskDone.Done;
+                return Task.CompletedTask;
             }
 
             public void Clear()

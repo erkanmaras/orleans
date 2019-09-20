@@ -1,8 +1,10 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
 using Orleans;
 using Orleans.Messaging;
 using Orleans.Runtime;
@@ -12,8 +14,10 @@ using TestExtensions;
 using UnitTests.GrainInterfaces;
 using Xunit;
 using Microsoft.Extensions.DependencyInjection;
+using Orleans.Configuration;
+using Orleans.Hosting;
 
-namespace Tester.ClientConnectionTests
+namespace Tester
 {
     public class TestGatewayManager : IGatewayListProvider
     {
@@ -21,16 +25,16 @@ namespace Tester.ClientConnectionTests
 
         public bool IsUpdatable => true;
 
-        public static IList<Uri> Gateways { get; }
+        public IList<Uri> Gateways { get; }
 
-        static TestGatewayManager()
+        public TestGatewayManager()
         {
             Gateways = new List<Uri>();
         }
 
-        public Task InitializeGatewayListProvider(ClientConfiguration clientConfiguration, Logger logger)
+        public Task InitializeGatewayListProvider()
         {
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         public Task<IList<Uri>> GetGateways()
@@ -43,20 +47,54 @@ namespace Tester.ClientConnectionTests
     {
         private readonly OutsideRuntimeClient runtimeClient;
 
-        public override TestCluster CreateTestCluster()
+        protected override void ConfigureTestCluster(TestClusterBuilder builder)
         {
-            var options = new TestClusterOptions(1)
+            builder.Options.UseTestClusterMembership = false;
+            builder.Options.InitialSilosCount = 1;
+            builder.AddSiloBuilderConfigurator<SiloBuilderConfigurator>();
+            builder.AddClientBuilderConfigurator<ClientBuilderConfigurator>();
+        }
+
+        public class SiloBuilderConfigurator : ISiloBuilderConfigurator
+        {
+            public void Configure(ISiloHostBuilder hostBuilder)
             {
-                ClientConfiguration =
+                hostBuilder.UseLocalhostClustering();
+                hostBuilder.ConfigureServices((context, services) =>
                 {
-                    GatewayProvider = ClientConfiguration.GatewayProviderType.Custom,
-                    CustomGatewayProviderAssemblyName = "Tester",
-                    GatewayListRefreshPeriod = TimeSpan.FromMilliseconds(100)
-                }
-            };
-            var primaryGw = options.ClusterConfiguration.Overrides["Primary"].ProxyGatewayEndpoint.ToGatewayUri();
-            TestGatewayManager.Gateways.Add(primaryGw);
-            return new TestCluster(options);
+                    var cfg = context.Configuration;
+                    var siloPort = int.Parse(cfg[nameof(TestClusterOptions.BaseSiloPort)]);
+                    var gatewayPort = int.Parse(cfg[nameof(TestClusterOptions.BaseGatewayPort)]);
+                    services.Configure<EndpointOptions>(options =>
+                    {
+                        options.SiloPort = siloPort;
+                        options.GatewayPort = gatewayPort;
+                    });
+                });
+            }
+        }
+
+        public class ClientBuilderConfigurator : IClientBuilderConfigurator
+        {
+            public void Configure(IConfiguration configuration, IClientBuilder clientBuilder)
+            {
+                var basePort = int.Parse(configuration[nameof(TestClusterOptions.BaseGatewayPort)]);
+                var primaryGw = new IPEndPoint(IPAddress.Loopback, basePort).ToGatewayUri();
+                clientBuilder.Configure<GatewayOptions>(options =>
+                {
+                    options.GatewayListRefreshPeriod = TimeSpan.FromMilliseconds(100);
+                });
+                clientBuilder.ConfigureServices(services =>
+                {
+                    services.AddSingleton(sp =>
+                    {
+                        var gateway = new TestGatewayManager();
+                        gateway.Gateways.Add(primaryGw);
+                        return gateway;
+                    });
+                    services.AddFromExisting<IGatewayListProvider, TestGatewayManager>();
+                });
+            }
         }
 
         public GatewayConnectionTests()
@@ -74,17 +112,19 @@ namespace Tester.ClientConnectionTests
             var timeoutCount = 0;
 
             // Fake Gateway
-            var port = HostedCluster.ClusterConfiguration.PrimaryNode.Port + 2;
+            var gateways = await this.HostedCluster.Client.ServiceProvider.GetRequiredService<IGatewayListProvider>().GetGateways();
+            var port = gateways.First().Port + 2;
             var endpoint = new IPEndPoint(IPAddress.Loopback, port);
             var evt = new SocketAsyncEventArgs();
+            var gatewayManager = this.runtimeClient.ServiceProvider.GetService<TestGatewayManager>();
             evt.Completed += (sender, args) =>
             {
                 connectionCount++;
-                TestGatewayManager.Gateways.Remove(endpoint.ToGatewayUri());
+                gatewayManager.Gateways.Remove(endpoint.ToGatewayUri());
             };
 
             // Add the fake gateway and wait the refresh from the client
-            TestGatewayManager.Gateways.Add(endpoint.ToGatewayUri());
+            gatewayManager.Gateways.Add(endpoint.ToGatewayUri());
             await Task.Delay(200);
 
             using (var socket = new Socket(endpoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp))

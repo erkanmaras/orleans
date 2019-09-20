@@ -1,9 +1,12 @@
-﻿using System;
+using System;
 using System.Runtime.Serialization;
 using System.Threading.Tasks;
 using Orleans;
 using Orleans.Providers;
 using Orleans.Runtime;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.DependencyInjection;
+using Orleans.Serialization;
 
 namespace UnitTests.StorageTests
 {
@@ -19,14 +22,17 @@ namespace UnitTests.StorageTests
     }
 
     [Serializable]
-    public class StorageProviderInjectedError : Exception
+    public struct ErrorInjectionBehavior
+    {
+        public static readonly ErrorInjectionBehavior None = new ErrorInjectionBehavior { ErrorInjectionPoint = ErrorInjectionPoint.None };
+        public Type ExceptionType { get; set; }
+        public ErrorInjectionPoint ErrorInjectionPoint { get; set; }
+    }
+
+    [Serializable]
+    public class StorageProviderInjectedError : OrleansException
     {
         private readonly ErrorInjectionPoint errorInjectionPoint;
-
-        public StorageProviderInjectedError(SerializationInfo info, StreamingContext context)
-            : base(info, context)
-        {
-        }
 
         public StorageProviderInjectedError(ErrorInjectionPoint errorPoint)
         {
@@ -45,84 +51,109 @@ namespace UnitTests.StorageTests
                 return "ErrorInjectionPoint=" + Enum.GetName(typeof(ErrorInjectionPoint), errorInjectionPoint);
             }
         }
+
+        protected StorageProviderInjectedError(SerializationInfo info, StreamingContext context)
+            : base(info, context)
+        {
+        }
     }
 
     public class ErrorInjectionStorageProvider : MockStorageProvider, IControllable
     {
-        public ErrorInjectionPoint ErrorInjection { get; private set; }
+        private ILogger logger;
+
+        public ErrorInjectionStorageProvider(
+            ILogger<ErrorInjectionStorageProvider> logger,
+            ILoggerFactory loggerFactory,
+            SerializationManager serializationManager) : base(loggerFactory, serializationManager)
+        {
+            this.logger = logger;
+            SetErrorInjection(ErrorInjectionBehavior.None);
+        }
+
+        public static void SetErrorInjection(string providerName, ErrorInjectionBehavior errorInjectionBehavior, IGrainFactory grainFactory)
+        {
+            IManagementGrain mgmtGrain = grainFactory.GetGrain<IManagementGrain>(0);
+            mgmtGrain.SendControlCommandToProvider(
+                typeof(ErrorInjectionStorageProvider).FullName,
+                providerName, 
+                (int)Commands.SetErrorInjection,
+                errorInjectionBehavior)
+                .Wait();
+        }
+
+        public ErrorInjectionBehavior ErrorInjection { get; private set; }
 
         internal static bool DoInjectErrors = true;
 
-        public void SetErrorInjection(ErrorInjectionPoint errorInject)
+        public void SetErrorInjection(ErrorInjectionBehavior errorInject)
         {
             ErrorInjection = errorInject;
-            Log.Info(0, "Set ErrorInjection to {0}", ErrorInjection);
+            logger.Info(0, "Set ErrorInjection to {0}", ErrorInjection);
         }
-
-        public async override Task Init(string name, IProviderRuntime providerRuntime, IProviderConfiguration config)
-        {
-            Log = providerRuntime.GetLogger(this.GetType().FullName);
-            Log.Info(0, "Init ErrorInjection={0}", ErrorInjection);
-            try
-            {
-                SetErrorInjection(ErrorInjectionPoint.None);
-                await base.Init(name, providerRuntime, config);
-            }
-            catch (Exception exc)
-            {
-                Log.Error(0, "Unexpected error during Init", exc);
-                throw;
-            }
-        }
-
+        
         public async override Task Close()
         {
-            Log.Info(0, "Close ErrorInjection={0}", ErrorInjection);
+            logger.Info(0, "Close ErrorInjection={0}", ErrorInjection);
             try
             {
-                SetErrorInjection(ErrorInjectionPoint.None);
+                SetErrorInjection(ErrorInjectionBehavior.None);
                 await base.Close();
             }
             catch (Exception exc)
             {
-                Log.Error(0, "Unexpected error during Close", exc);
+                logger.Error(0, "Unexpected error during Close", exc);
                 throw;
             }
         }
 
         public async override Task ReadStateAsync(string grainType, GrainReference grainReference, IGrainState grainState)
         {
-            Log.Info(0, "ReadStateAsync for {0} {1} ErrorInjection={2}", grainType, grainReference, ErrorInjection);
+            logger.Info(0, "ReadStateAsync for {0} {1} ErrorInjection={2}", grainType, grainReference, ErrorInjection);
             try
             {
-                if (ErrorInjection == ErrorInjectionPoint.BeforeRead && DoInjectErrors) throw new StorageProviderInjectedError(ErrorInjection);
+                ThrowIfMatches(ErrorInjectionPoint.BeforeRead);
                 await base.ReadStateAsync(grainType, grainReference, grainState);
-                if (ErrorInjection == ErrorInjectionPoint.AfterRead && DoInjectErrors) throw new StorageProviderInjectedError(ErrorInjection);
+                ThrowIfMatches(ErrorInjectionPoint.AfterRead);
             }
             catch (Exception exc)
             {
-                Log.Warn(0, "Injected error during ReadStateAsync for {0} {1} Exception = {2}", grainType, grainReference, exc);
+                logger.Warn(0, "Injected error during ReadStateAsync for {0} {1} Exception = {2}", grainType, grainReference, exc);
                 throw;
             }
         }
 
         public async override Task WriteStateAsync(string grainType, GrainReference grainReference, IGrainState grainState)
         {
-            Log.Info(0, "WriteStateAsync for {0} {1} ErrorInjection={0}", grainType, grainReference, ErrorInjection);
+            logger.Info(0, "WriteStateAsync for {grainType} {grainReference} ErrorInjection={errorInjection}", grainType, grainReference, ErrorInjection);
             try
             {
-                if (ErrorInjection == ErrorInjectionPoint.BeforeWrite && DoInjectErrors) throw new StorageProviderInjectedError(ErrorInjection);
+                ThrowIfMatches(ErrorInjectionPoint.BeforeWrite);
                 await base.WriteStateAsync(grainType, grainReference, grainState);
-                if (ErrorInjection == ErrorInjectionPoint.AfterWrite && DoInjectErrors) throw new StorageProviderInjectedError(ErrorInjection);
+                ThrowIfMatches(ErrorInjectionPoint.AfterWrite);
             }
             catch (Exception exc)
             {
-                Log.Warn(0, "Injected error during WriteStateAsync for {0} {1} Exception = {2}", grainType, grainReference, exc);
+                logger.Warn(0, "Injected error during WriteStateAsync for {0} {1} Exception = {2}", grainType, grainReference, exc);
                 throw;
             }
         }
 
-        #region IControllable interface methods
+        private void ThrowIfMatches(ErrorInjectionPoint executingPoint)
+        {
+            if (DoInjectErrors && ErrorInjection.ErrorInjectionPoint == executingPoint)
+            {
+                if (ErrorInjection.ExceptionType == null || ErrorInjection.ExceptionType == typeof(StorageProviderInjectedError))
+                {
+                    throw new StorageProviderInjectedError(ErrorInjection.ErrorInjectionPoint);
+                }
+                else
+                {
+                    throw ((Exception)Activator.CreateInstance(ErrorInjection.ExceptionType));
+                }
+            }
+        }
+
         /// <summary>
         /// A function to execute a control command.
         /// </summary>
@@ -133,12 +164,11 @@ namespace UnitTests.StorageTests
             switch ((Commands)command)
             {
                 case Commands.SetErrorInjection:
-                    SetErrorInjection((ErrorInjectionPoint)arg);
+                    SetErrorInjection((ErrorInjectionBehavior)arg);
                     return Task.FromResult<object>(true);
                 default:
                     return base.ExecuteCommand(command, arg);
             }
         }
-        #endregion
     }
 }

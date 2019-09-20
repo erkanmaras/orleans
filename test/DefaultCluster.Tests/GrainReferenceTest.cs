@@ -1,8 +1,9 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Formatters.Binary;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
 using Orleans;
 using Orleans.Runtime;
 using Orleans.Serialization;
@@ -13,6 +14,8 @@ using Xunit;
 
 namespace DefaultCluster.Tests.General
 {
+    using Microsoft.Extensions.DependencyInjection;
+
     /// <summary>
     /// Summary description for GrainReferenceTest
     /// </summary>
@@ -99,6 +102,34 @@ namespace DefaultCluster.Tests.General
         {
             int id = random.Next();
             TestGrainReferenceSerialization(id, true, true);
+        }
+
+        [Fact, TestCategory("Serialization"), TestCategory("JSON")]
+        public async Task GrainReference_Json_Serialization_Nested()
+        {
+            var typeResolver = this.HostedCluster.Client.ServiceProvider.GetRequiredService<ITypeResolver>();
+            var settings = OrleansJsonSerializer.GetDefaultSerializerSettings(typeResolver, HostedCluster.GrainFactory);
+            
+            var grain = HostedCluster.GrainFactory.GetGrain<ISimpleGrain>(GetRandomGrainId());
+            await grain.SetA(56820);
+            var input = new GenericGrainReferenceHolder
+            {
+                Reference = grain as GrainReference
+            };
+
+            var json = JsonConvert.SerializeObject(input, settings);
+            var output = JsonConvert.DeserializeObject<GenericGrainReferenceHolder>(json, settings);
+
+            Assert.Equal(input.Reference, output.Reference);
+            var reference = output.Reference;
+            Assert.Equal(56820, await ((ISimpleGrain)reference).GetA());
+        }
+
+        [Serializable]
+        public class GenericGrainReferenceHolder
+        {
+            [JsonProperty]
+            public GrainReference Reference { get; set; }
         }
 
         [Fact, TestCategory("Serialization"), TestCategory("JSON")]
@@ -198,34 +229,23 @@ namespace DefaultCluster.Tests.General
             {
                 var formatter = new BinaryFormatter
                 {
-#if !NETSTANDARD_TODO
                     Context = new StreamingContext(StreamingContextStates.All, new SerializationContext(this.HostedCluster.SerializationManager))
-#endif
                 };
                 formatter.Serialize(memoryStream, obj);
                 memoryStream.Flush();
                 memoryStream.Position = 0; // Reset to start
                 other = (T)formatter.Deserialize(memoryStream);
-#if NETSTANDARD_TODO
-                // On .NET Standard, currently we need to manually fixup grain references.
-                var otherAsRef = other as Orleans.Runtime.GrainReference;
-                if (otherAsRef != null) this.GrainFactory.BindGrainReference(otherAsRef);
-#endif
             }
             return other;
         }
 
         private T NewtonsoftJsonSerializeRoundtrip<T>(T obj)
         {
-            var settings = OrleansJsonSerializer.GetDefaultSerializerSettings(this.HostedCluster.SerializationManager, this.GrainFactory);
+            var typeResolver = this.HostedCluster.Client.ServiceProvider.GetRequiredService<ITypeResolver>();
+            var settings = OrleansJsonSerializer.GetDefaultSerializerSettings(typeResolver, this.GrainFactory);
             // http://james.newtonking.com/json/help/index.html?topic=html/T_Newtonsoft_Json_JsonConvert.htm
-            string json = Newtonsoft.Json.JsonConvert.SerializeObject(obj, settings);
-            object other = Newtonsoft.Json.JsonConvert.DeserializeObject(json, obj.GetType(), settings);
-#if NETSTANDARD_TODO
-                // On .NET Standard, currently we need to manually fixup grain references.
-                var otherAsRef = other as Orleans.Runtime.GrainReference;
-                if (otherAsRef != null) this.GrainFactory.BindGrainReference(otherAsRef);
-#endif
+            string json = JsonConvert.SerializeObject(obj, settings);
+            object other = JsonConvert.DeserializeObject(json, typeof(T), settings);
             return (T)other;
         }
     }
